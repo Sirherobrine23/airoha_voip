@@ -19,6 +19,7 @@
 #include "si_voice.h"
 #include "si3219x.h"
 #include "si3219x_LCCB_constants.h"
+#include "en75xx_proslic_fw.h"
 
 #define SI3219X_REG_RAM_WAIT	4
 #define SI3219X_REG_RAM_HI	5
@@ -34,6 +35,15 @@
 #define SI3219X_RAM_HIGH(addr)	(((addr) >> 3) & 0xe0)
 #define SI3219X_RAM_WAIT_TRIES	100
 
+/*
+ * BOM variant of the DC-DC converter on the board. It selects which
+ * patch blob gets loaded, so it has to come from the device tree: the
+ * chip cannot report how it was wired up.
+ */
+static char *bom = "lcqc";
+module_param(bom, charp, 0444);
+MODULE_PARM_DESC(bom, "ProSLIC BOM variant (lcqc, fb, bb, tss, tss_iso)");
+
 struct en75xx_si3219x {
 	struct spi_device *spi;
 	struct gpio_desc *reset_gpio;
@@ -41,6 +51,7 @@ struct en75xx_si3219x {
 	SiVoiceControlInterfaceType ctrl;
 	SiVoiceDeviceType *device;
 	SiVoiceChanType_ptr channel;
+	struct en75xx_proslic_fw fw;
 	proslicChanType_ptr channel_ptrs[1];
 	struct en75xx_pcm *pcm;
 	struct en75xx_voice_line *voice_line;
@@ -321,10 +332,25 @@ static int en75xx_si3219x_api_init(struct en75xx_si3219x *slic)
 		goto err;
 	slic->channel_ptrs[0] = slic->channel;
 
+	/*
+	 * The API picks its patch through fixed symbols. Fill them from
+	 * firmware before Init runs, otherwise it loads an empty patch
+	 * and the chip comes up without its DSP image.
+	 */
+	ret = en75xx_proslic_fw_load(&slic->spi->dev, "si3219x", 'A', bom,
+				     &slic->fw);
+	if (ret)
+		goto err;
+
+	en75xx_proslic_fw_to_patch(&slic->fw, &si3219xPatchRevALCQC);
+	en75xx_proslic_fw_to_patch(&slic->fw, &RevAPatch);
+
 	SiVoice_Reset(slic->channel);
 	ret = ProSLIC_Init(slic->channel_ptrs, 1);
-	if (ret != RC_NONE)
+	if (ret != RC_NONE) {
+		en75xx_proslic_fw_free(&slic->fw);
 		goto err;
+	}
 
 	if (ProSLIC_DCFeedSetup(slic->channel, DCFEED_48V_20MA) != RC_NONE ||
 	    ProSLIC_ZsynthSetup(slic->channel, ZSYN_600_0_0_30_0) != RC_NONE ||
@@ -418,6 +444,7 @@ static void en75xx_si3219x_remove(struct spi_device *spi)
 	ProSLIC_SetLinefeedStatus(slic->channel, LF_OPEN);
 	SiVoice_destroyChannels(&slic->channel);
 	SiVoice_destroyDevices(&slic->device);
+	en75xx_proslic_fw_free(&slic->fw);
 	en75xx_pcm_put(slic->pcm);
 }
 
@@ -439,4 +466,6 @@ static struct spi_driver en75xx_si3219x_driver = {
 module_spi_driver(en75xx_si3219x_driver);
 
 MODULE_DESCRIPTION("Silicon Labs Si32192/Si3219x FXS driver for EN75xx");
+MODULE_FIRMWARE("en75xx/proslic/si3219x_a_lcqc.fw");
+MODULE_FIRMWARE("en75xx/proslic/si3219x_a.fw");
 MODULE_LICENSE("GPL");

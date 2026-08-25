@@ -9,6 +9,7 @@ PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=Sirherobrine23
 
 include $(INCLUDE_DIR)/package.mk
+include ./firmware.mk
 
 define KernelPackage/en75xx-pcm
   SUBMENU:=Voice over IP
@@ -54,6 +55,8 @@ define KernelPackage/en75xx-slic-si3219x/description
  Si32192 used on the TP-Link XX230v and XC220-G3v boards.
 endef
 
+# The blobs live next to the sources so the converter output and the
+# packaged firmware cannot drift apart.
 define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)
 	$(CP) ./src/. $(PKG_BUILD_DIR)/
@@ -68,3 +71,5 @@ endef
 $(eval $(call KernelPackage,en75xx-pcm))
 $(eval $(call KernelPackage,en75xx-slic-le9642))
 $(eval $(call KernelPackage,en75xx-slic-si3219x))
+$(eval $(call BuildPackage,en75xx-proslic-firmware))
+$(eval $(call BuildPackage,en75xx-dxs-firmware))

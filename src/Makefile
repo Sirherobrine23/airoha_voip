@@ -23,13 +23,18 @@ en75xx-slic-le9642-objs    := en75xx_slic_le9642.o
 
 # The ProSLIC driver links the Skyworks API sources from vendor/.
 PROSLIC_DIR := ../vendor/proslic
-en75xx-slic-si3219x-objs   := en75xx_slic_si3219x.o \
+#
+# The patch is NOT compiled in: it is loaded from
+# en75xx/proslic/si3219x_<rev>[_<bom>].fw at probe time, which is what
+# en75xx_proslic_fw.o provides. That keeps one module working across
+# revisions and BOM variants instead of one build per variant.
+#
+en75xx-slic-si3219x-objs   := en75xx_slic_si3219x.o en75xx_proslic_fw.o \
 	$(PROSLIC_DIR)/src/proslic.o \
 	$(PROSLIC_DIR)/src/si_voice.o \
 	$(PROSLIC_DIR)/src/si_voice_version.o \
 	$(PROSLIC_DIR)/src/si3219x_intf.o \
-	$(PROSLIC_DIR)/custom/si3219x_LCCB_constants.o \
-	$(PROSLIC_DIR)/patch_files/si3219x_patch_A_2017MAY25.o
+	$(PROSLIC_DIR)/custom/si3219x_LCCB_constants.o
 
 ccflags-y += -I$(src)/../include
 ccflags-y += -DSI3219X -DENABLE_DEBUG

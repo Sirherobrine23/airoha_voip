@@ -16,6 +16,8 @@ src/en75xx_voice_core.c line registry + character device
 src/en75xx_zsi.c        ZSI transport (SLIC control over the PCM bus)
 src/en75xx_slic_le9642.c  Microsemi Le9641/Le9642 over ZSI
 src/en75xx_slic_si3219x.c Skyworks Si3218x/Si3219x over SPI
+src/en75xx_proslic_fw.c ProSLIC patch firmware loader
+tools/proslic-patch2fw.py  patch .c -> firmware blob converter
 asterisk/chan_en75xx.c  Asterisk channel driver (type EN75XX)
 vendor/proslic/         Skyworks ProSLIC API + Si3219x patch
 vendor/vp886/           Microsemi VoicePath API-II (reference)
@@ -87,9 +89,14 @@ selected.
 
 `firmware/dxs/` holds `DXS_FW.bin` and `DXS_BBD.bin`, recovered from a
 Nokia G-240G-E. The PRAM patch is optional (the DUSLIC-XS falls back to
-its ROM firmware); the BBD is not. The ProSLIC patch is not a binary at
-all — it is `vendor/proslic/patch_files/si3219x_patch_A_2017MAY25.c`,
-compiled into the module.
+its ROM firmware); the BBD is not.
+
+`firmware/proslic/` holds 19 ProSLIC DSP patches converted from the API
+C sources by `tools/proslic-patch2fw.py`, covering Si3217x/18x/19x/26x/28x
+across their BOM variants. The driver loads one at probe instead of
+having it compiled in, so a single module build serves every variant.
+`firmware/proslic/INDEX` maps each blob back to its API symbol names and
+source files.
 
 ## Reading order for the docs
 
@@ -97,3 +104,5 @@ compiled into the module.
    register values that matter, with the evidence behind each one.
 2. `docs/02-asterisk.md` — how the FXS lines reach the dialplan, and why
    this is a channel driver rather than a DAHDI span.
+3. `docs/03-proslic-firmware.md` — the patch blob format, and what the
+   conversion turned up about the vendor's own patch sources.
