@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Example: EN751221 board with two FXS ports on a single dual-channel
+ * Microsemi Le9642, reached over ZSI.
+ *
+ * Modelled on the TP-Link Archer XR500v, which is the board this path
+ * was proven on. Merge the &-references into your own board .dts; the
+ * /dts-v1/ line and the SoC include are only here so the file stands
+ * alone for reference.
+ */
+
+/dts-v1/;
+
+#include "en751221.dtsi"
+#include "en751221-voice.dtsi"
+
+/ {
+	model = "EN751221 with 2x FXS (Le9642)";
+	compatible = "econet,en751221";
+};
+
+&pcm0 {
+	status = "okay";
+};
+
+&zsi0 {
+	status = "okay";
+
+	slic0: slic@0 {
+		compatible = "microsemi,le9642";
+		reg = <0>;
+
+		airoha,zsi = <&zsi0>;
+		airoha,pcm = <&pcm0>;
+		airoha,lines = <2>;
+
+		/*
+		 * PCM *bus* timeslots, not DMA channels. The RX DMA lands
+		 * a slot's audio on channel (slot - 4), so 4 -> ch0 and
+		 * 6 -> ch2. Two lines must not share a slot; giving both
+		 * slot 4 makes the second line silent rather than
+		 * failing to probe.
+		 */
+		airoha,bus-slots = <4 6>;
+
+		/* u-law is the default; uncomment for a-law regions */
+		/* airoha,a-law; */
+
+		status = "okay";
+	};
+};

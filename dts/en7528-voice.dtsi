@@ -1,0 +1,147 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Voice blocks for EcoNet EN7528 (MIPS, little endian).
+ *
+ * Upstream device tree style, matching en7528.dtsi. Two structural
+ * differences from EN751221 worth knowing before you copy anything
+ * between the two:
+ *
+ *   - peripherals live under an unlabelled "soc" node here, not at the
+ *     root, so the fragment nests them the same way;
+ *   - chip_scu carries an extra "airoha,scuclk" compatible:
+ *     "airoha,scuclk", "econet,en7528-chip-scu", "syscon".
+ *
+ * PCM generation: gen1, same as EN751221 -- 4+4 timeslot registers,
+ * 36-byte descriptors, ring config 0x9f, same register addresses. The
+ * endianness is what differs, and it affects how 16-bit samples land in
+ * the DMA buffer rather than how the block is programmed.
+ *
+ *   #include "en7528-voice.dtsi"
+ */
+
+&pinctrl {
+	/*
+	 * Groups from pinctrl-en7528.c. Most PCM mux bits live in
+	 * chip_scu + 0x015c (REG_PON_I2C_MODE); chip selects 2 to 7 are
+	 * in REG_FORCE_GPIO22_EN instead.
+	 *
+	 *	pcm1          gpio 12-15   0x15c bit 19
+	 *	pcm2          gpio 24-27   0x15c bit 20
+	 *	pcm_spi       gpio 4-7     0x15c bit 18
+	 *	pcm_spi_int   gpio 1       0x15c bit 17
+	 *	pcm_spi_rst   gpio 2       0x15c bit 16
+	 *	pcm_spi_cs1   gpio 3       0x15c bit 14
+	 *	pcm_spi_cs2   gpio 10      FORCE_GPIO22_EN bit 10
+	 *	pcm_spi_cs3   gpio 23      FORCE_GPIO22_EN bit 11
+	 *	pcm_spi_cs4   gpio 21      FORCE_GPIO22_EN bit 12
+	 *	pcm_spi_cs5   gpio 9       FORCE_GPIO22_EN bit 13
+	 *	pcm_spi_cs6   gpio 28      FORCE_GPIO22_EN bit 14
+	 *	pcm_spi_cs7   gpio 29      FORCE_GPIO22_EN bit 15
+	 *
+	 * Unlike EN7523 and EN751221, "pcm_spi" here has its own four
+	 * pins and does not overlap either PCM bus. A board can run both
+	 * PCM buses and the SLIC control channel at the same time, and
+	 * seven chip selects means this part was meant for far more FXS
+	 * lines than the others.
+	 */
+
+	pcm1_pins: pcm1-pins {
+		mux {
+			function = "pcm";
+			groups = "pcm1";
+		};
+	};
+
+	pcm2_pins: pcm2-pins {
+		mux {
+			function = "pcm";
+			groups = "pcm2";
+		};
+	};
+
+	/* dedicated SLIC control pins, no overlap with the PCM buses */
+	pcm_spi_pins: pcm-spi-pins {
+		mux {
+			function = "pcm_spi";
+			groups = "pcm_spi", "pcm_spi_int", "pcm_spi_rst";
+		};
+	};
+
+	pcm_spi_cs1_pins: pcm-spi-cs1-pins {
+		mux {
+			function = "pcm_spi";
+			groups = "pcm_spi_cs1";
+		};
+	};
+
+	pcm_spi_cs2_pins: pcm-spi-cs2-pins {
+		mux {
+			function = "pcm_spi";
+			groups = "pcm_spi_cs2";
+		};
+	};
+};
+
+/ {
+	soc {
+		pcm0: pcm@1fbd0000 {
+			compatible = "econet,en7528-pcm";
+			reg = <0x1fbd0000 0x1000>;
+			reg-names = "pcm";
+
+			/* interrupts = <12>; see the EN751221 note */
+
+			airoha,scu = <&scuclk>;
+			airoha,chip-scu = <&chip_scu>;
+
+			/*
+			 * econet,en7528-scu.h defines FE, GSW, GDMP and
+			 * XPON resets only -- no PCM line -- so the block
+			 * is reset through the raw bit in NP SCU 0x834.
+			 */
+			airoha,pcm-reset-mask = <0x800>;
+
+			pinctrl-names = "default";
+			pinctrl-0 = <&pcm1_pins>;
+
+			airoha,pcm-interface-control = <0xf5071306>;
+
+			airoha,tx-slot-config = <0x10301020 0x10501040
+						 0x10701060 0x10901080>;
+			airoha,rx-slot-config = <0x10301020 0x10501040
+						 0x10701060 0x10901080>;
+
+			status = "disabled";
+		};
+
+		pcm1: pcm@1fbd2000 {
+			compatible = "econet,en7528-pcm";
+			reg = <0x1fbd2000 0x1000>;
+			reg-names = "pcm";
+			airoha,scu = <&scuclk>;
+			airoha,chip-scu = <&chip_scu>;
+			airoha,pcm-reset-mask = <0x1000>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&pcm2_pins>;
+			airoha,pcm-interface-control = <0xf5071306>;
+			status = "disabled";
+		};
+
+		zsi0: zsi@1fbd1000 {
+			compatible = "econet,en7528-zsi";
+			reg = <0x1fbd1000 0x1000>;
+			reg-names = "zsi";
+
+			airoha,scu = <&scuclk>;
+			airoha,chip-scu = <&chip_scu>;
+
+			pinctrl-names = "default";
+			pinctrl-0 = <&pcm_spi_pins>, <&pcm_spi_cs1_pins>;
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+			airoha,zsi-gap-us = <5000>;
+			status = "disabled";
+		};
+	};
+};

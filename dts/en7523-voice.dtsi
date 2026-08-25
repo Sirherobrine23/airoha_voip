@@ -1,0 +1,181 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Voice blocks for Airoha EN7523, upstream device tree style.
+ *
+ * Matches arch/arm64/boot/dts/airoha/en7523.dtsi: peripherals live
+ * directly under the root, the two control blocks are syscons
+ * referenced by phandle, and pin muxing goes through pinctrl.
+ *
+ *	chip_scu: syscon@1fa20000   "airoha,chip-scu", "syscon"
+ *	scuclk:   system-controller@1fb00000
+ *	                            "airoha,en7523-scu", "airoha,scuclk", "syscon"
+ *	pinctrl:  child of system-controller@1fbf0200
+ *
+ * Addresses and the interrupt come from the vendor tree, which is
+ * identical on EN7552 and EN7581 apart from the cell count:
+ *
+ *	pcm@bfbd0000 {
+ *		compatible = "econet,ecnt-pcm";
+ *		reg = <0x1fbd0000 0x4fff>;
+ *		interrupts = <GIC_SPI 27 IRQ_TYPE_LEVEL_HIGH>;
+ *	};
+ *
+ * The vendor claims that whole 0x5000 window: PCM1 at +0x0000, the ZSI
+ * wrapper at +0x1000, PCM2 at +0x2000 and a second wrapper at +0x4098.
+ * This tree splits it so the PCM engine and the ZSI transport can be
+ * separate modules. The ranges do not overlap, so both views are valid.
+ *
+ * PCM generation: gen2 -- 32 timeslots, 12-byte descriptors, per-channel
+ * enable at 0xac, ring config 0x3f. See docs/01-pcm-descriptor-layouts.md.
+ *
+ *   #include "en7523-voice.dtsi"
+ */
+
+&pinctrl {
+	/*
+	 * Pin groups from drivers/pinctrl/mediatek/pinctrl-airoha... see
+	 * pinctrl-en7523.c. Mux bits all live in chip_scu + 0x214
+	 * (REG_GPIO_SPI_CS1_MODE).
+	 *
+	 *	pcm1              gpio 24-27      bit 12
+	 *	pcm2              gpio 16-19      bit 13
+	 *	pcm_spi           gpio 16-19,24-27  bit 16
+	 *	pcm_spi_rst       gpio 14         bit 8
+	 *	pcm_spi_int       gpio 15         bit 9
+	 *	pcm_spi_cs1       gpio 22         bit 17
+	 *	pcm_spi_cs2_p128  gpio 39         bit 18
+	 *	pcm_spi_cs2_p156  gpio 39         bit 19
+	 *	pcm_spi_cs3       gpio 20         bit 20
+	 *	pcm_spi_cs4       gpio 23         bit 21
+	 *
+	 * Note that "pcm_spi" occupies the same eight pins as pcm1 and
+	 * pcm2 together. That is the hardware saying what the ZSI work
+	 * found from the other end: the SLIC control channel is
+	 * multiplexed onto the PCM pins, not carried on a separate bus.
+	 * Do not select pcm1/pcm2 and pcm_spi at the same time.
+	 */
+
+	pcm1_pins: pcm1-pins {
+		mux {
+			function = "pcm";
+			groups = "pcm1";
+		};
+	};
+
+	pcm2_pins: pcm2-pins {
+		mux {
+			function = "pcm";
+			groups = "pcm2";
+		};
+	};
+
+	/* PCM bus plus the multiplexed SLIC control channel */
+	pcm_spi_pins: pcm-spi-pins {
+		mux {
+			function = "pcm_spi";
+			groups = "pcm_spi", "pcm_spi_int", "pcm_spi_rst";
+		};
+	};
+
+	/* one chip select per SLIC; add only what the board wires */
+	pcm_spi_cs1_pins: pcm-spi-cs1-pins {
+		mux {
+			function = "pcm_spi";
+			groups = "pcm_spi_cs1";
+		};
+	};
+
+	pcm_spi_cs2_pins: pcm-spi-cs2-pins {
+		mux {
+			function = "pcm_spi";
+			groups = "pcm_spi_cs2_p128";
+		};
+	};
+};
+
+/ {
+	pcm0: pcm@1fbd0000 {
+		compatible = "airoha,en7523-pcm";
+		reg = <0x1fbd0000 0x1000>;
+		reg-names = "pcm";
+
+		interrupts = <GIC_SPI 27 IRQ_TYPE_LEVEL_HIGH>;
+
+		/*
+		 * Syscon phandles rather than raw ranges. The vendor
+		 * trees put <0x1fb00000 0x1000> and <0x1fa20000 0x1000>
+		 * in this node's reg; the driver still accepts that, but
+		 * on an upstream tree those addresses belong to scuclk
+		 * and chip_scu, and claiming them here would collide.
+		 */
+		airoha,scu = <&scuclk>;
+		airoha,chip-scu = <&chip_scu>;
+
+		/*
+		 * With a pinctrl state present the driver leaves the mux
+		 * alone -- the pinctrl core applies it before probe.
+		 * Boards using the multiplexed SLIC control channel want
+		 * &pcm_spi_pins here instead of &pcm1_pins.
+		 */
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcm1_pins>;
+
+		/*
+		 * The computed default from the vendor's own config node
+		 * is 0x00051306; the value below is what a stock device
+		 * reads back. If a board misbehaves, 0x00051306 is the
+		 * other candidate -- see docs/01, section on IFACE_CTRL.
+		 */
+		airoha,pcm-interface-control = <0xf5071306>;
+
+		airoha,tx-slot-config = <0x10301020 0x10501040
+					 0x10701060 0x10901080>;
+		airoha,rx-slot-config = <0x10301020 0x10501040
+					 0x10701060 0x10901080>;
+
+		status = "disabled";
+	};
+
+	/*
+	 * Second PCM instance. Present in silicon and inside the vendor's
+	 * window, but the vendor tree never names it and no board seen so
+	 * far wires it up, so there is no interrupt number here -- add one
+	 * only with evidence. Without "interrupts" the driver runs its
+	 * polling worker, which is correct behaviour rather than a
+	 * fallback.
+	 */
+	pcm1: pcm@1fbd2000 {
+		compatible = "airoha,en7523-pcm";
+		reg = <0x1fbd2000 0x1000>;
+		reg-names = "pcm";
+		airoha,scu = <&scuclk>;
+		airoha,chip-scu = <&chip_scu>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcm2_pins>;
+		airoha,pcm-interface-control = <0xf5071306>;
+		status = "disabled";
+	};
+
+	/*
+	 * ZSI. On EN7523 the SLIC serial path does not use the old SIF
+	 * block, and it does not use spi@1fa10000 either -- that is the
+	 * flash controller. It rides the PCM pins through the wrapper in
+	 * this window, which is why this node wants &pcm_spi_pins and why
+	 * a board cannot have both this and pcm1_pins on pcm0.
+	 */
+	zsi0: zsi@1fbd1000 {
+		compatible = "airoha,en7523-zsi";
+		reg = <0x1fbd1000 0x1000>;
+		reg-names = "zsi";
+		airoha,scu = <&scuclk>;
+		airoha,chip-scu = <&chip_scu>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcm_spi_pins>, <&pcm_spi_cs1_pins>;
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+		airoha,zsi-gap-us = <5000>;
+		status = "disabled";
+	};
+};

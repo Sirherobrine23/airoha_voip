@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Example: EN7523 board with two FXS ports on a Skyworks Si32192.
+ *
+ * Modelled on the TP-Link XX230v. The visible difference from the
+ * EN7528 example is not the SLIC at all -- it is the PCM block:
+ * gen2 descriptors and 32 timeslots, selected by the compatible in
+ * en7523-voice.dtsi, and a PCM interrupt that actually maps (GIC_SPI 27,
+ * per the vendor tree), so the driver runs interrupt-driven instead of
+ * polled.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+
+#include "en7523.dtsi"
+#include "en7523-voice.dtsi"
+
+/ {
+	model = "EN7523 with 2x FXS (Si32192)";
+	compatible = "airoha,en7523";
+};
+
+&pcm0 {
+	/*
+	 * A ProSLIC talks over the real SPI controller, so the PCM pins
+	 * carry audio only: pcm1_pins, not pcm_spi_pins.
+	 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcm1_pins>;
+	status = "okay";
+};
+
+&spi0 {
+	status = "okay";
+
+	/* chip select 0 is typically the boot flash; start the SLIC at 1 */
+	proslic0: proslic@1 {
+		compatible = "silabs,si32192";
+		reg = <1>;
+		spi-max-frequency = <10000000>;
+		spi-cpha;
+		spi-cpol;
+
+		airoha,pcm = <&pcm0>;
+		airoha,pcm-channel = <0>;
+
+		reset-gpios = <&gpio 20 GPIO_ACTIVE_LOW>;
+
+		status = "okay";
+	};
+
+	proslic1: proslic@2 {
+		compatible = "silabs,si32192";
+		reg = <2>;
+		spi-max-frequency = <10000000>;
+		spi-cpha;
+		spi-cpol;
+
+		airoha,pcm = <&pcm0>;
+		airoha,pcm-channel = <2>;
+
+		status = "okay";
+	};
+};

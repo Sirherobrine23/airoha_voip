@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Example: EN7528 board with two FXS ports on a Skyworks Si32192
+ * ProSLIC, reached over SPI.
+ *
+ * Modelled on the TP-Link XC220-G3v. The Si32192 is a two-channel
+ * Si3219x, so one SPI device serves both lines: each line is a separate
+ * node under the SPI controller only if the board fits two chips.
+ * Here it is one chip, two channels.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+
+#include "en7528.dtsi"
+#include "en7528-voice.dtsi"
+
+/ {
+	model = "EN7528 with 2x FXS (Si32192)";
+	compatible = "econet,en7528";
+};
+
+&pcm0 {
+	status = "okay";
+};
+
+/*
+ * This is the same SPI master the boot flash uses (CR_SPI_BASE,
+ * 0x1fbc0000): the SLIC lives on its own chip select. Consequences in
+ * docs/06-spi-shared-with-flash.md -- the short version is that a flash
+ * erase will disturb a call in progress.
+ *
+ * Mode 3 (cpol = cpha = 1) at 10 MHz follows MediaTek's own ProSLIC
+ * integration; the driver asks for SPI_MODE_3 in spi_setup() anyway,
+ * so these mainly document intent and cap the clock.
+ */
+&spi {
+	status = "okay";
+
+	/* chip select 0 is typically the boot flash; start the SLIC at 1 */
+	proslic0: proslic@1 {
+		compatible = "silabs,si32192";
+		reg = <1>;
+		spi-max-frequency = <10000000>;
+		spi-cpha;
+		spi-cpol;
+
+		airoha,pcm = <&pcm0>;
+		airoha,pcm-channel = <0>;
+
+		reset-gpios = <&gpio 7 GPIO_ACTIVE_LOW>;
+
+		status = "okay";
+	};
+
+	proslic1: proslic@2 {
+		compatible = "silabs,si32192";
+		reg = <2>;
+		spi-max-frequency = <10000000>;
+		spi-cpha;
+		spi-cpol;
+
+		airoha,pcm = <&pcm0>;
+		airoha,pcm-channel = <2>;
+
+		status = "okay";
+	};
+};

@@ -21,7 +21,7 @@ tools/proslic-patch2fw.py  patch .c -> firmware blob converter
 asterisk/chan_en75xx.c  Asterisk channel driver (type EN75XX)
 vendor/proslic/         Skyworks ProSLIC API + Si3219x patch
 vendor/vp886/           Microsemi VoicePath API-II (reference)
-dts/                    device tree nodes
+dts/                    SoC fragments (en7523/en751221/en7528) + examples
 openwrt/                OpenWrt package
 docs/                   what was reverse engineered, and how
 ```
@@ -106,3 +106,9 @@ source files.
    this is a channel driver rather than a DAHDI span.
 3. `docs/03-proslic-firmware.md` — the patch blob format, and what the
    conversion turned up about the vendor's own patch sources.
+4. `docs/04-crosschecks.md` — independent confirmation of the bit delay,
+   SPI mode and clock mastering from MediaTek's ProSLIC integration.
+5. `docs/05-device-tree.md` — the bindings, and the slot-versus-channel
+   trap that makes a second line go silent instead of failing.
+6. `docs/06-spi-shared-with-flash.md` — why the ProSLIC shares the boot
+   flash's SPI controller, and what that costs during flash writes.

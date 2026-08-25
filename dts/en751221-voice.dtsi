@@ -1,52 +1,163 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Voice (PCM + ZSI + FXS) nodes for EN751221 boards.
+ * Voice blocks for EcoNet EN751221 (MIPS, big endian).
  *
- * The PCM interrupt (hwirq 12) does not map cleanly on this SoC -- the
- * INTC reports it as a shadow interrupt -- so the "interrupts" property
- * is left commented out and the driver falls back to its polling
- * worker. Uncomment it once the INTC binding handles hwirq 12.
+ * Upstream device tree style, matching en751221.dtsi: peripherals sit
+ * directly under the root, the two control blocks are syscons
+ * referenced by phandle, and pin muxing goes through pinctrl.
+ *
+ *	chip_scu: syscon@1fa20000            "airoha,chip-scu", "syscon"
+ *	scuclk:   system-controller@1fb00000 "econet,en751221-scu", "syscon"
+ *	pinctrl:  child of system-controller@1fbf0200
+ *
+ * PCM generation: gen1 -- 4+4 timeslot registers (8 slots per
+ * direction), 36-byte descriptors, ring config 0x9f. The register
+ * addresses are the same as on the ARM parts; only the descriptor
+ * format and the slot count differ, which the compatible selects.
+ * See docs/01-pcm-descriptor-layouts.md.
+ *
+ *   #include "en751221-voice.dtsi"
  */
 
-&soc {
+&pinctrl {
+	/*
+	 * Groups from pinctrl-en751221.c. Every PCM mux bit lives in
+	 * chip_scu + 0x0104 (REG_IOMUX_CONTROL1):
+	 *
+	 *	pcm1          gpio 25-28   bit 13
+	 *	pcm2          gpio 17-20   bit 14
+	 *	pcm_spi       gpio 17-20   bit 12  (SPI2_MODE)
+	 *	pcm_spi_int   gpio 16      bit 11
+	 *	pcm_spi_rst   gpio 15      bit 10
+	 *	pcm_spi_cs4   gpio 22      bit 9
+	 *	pcm_spi_cs3   gpio 16      bit 8
+	 *
+	 * "pcm_spi" occupies the same four pins as "pcm2", so a board
+	 * using the multiplexed SLIC control channel gives up the second
+	 * PCM bus. Note also that pcm_spi_int and pcm_spi_cs3 are both
+	 * gpio 16 -- pick one.
+	 *
+	 * This is the register the driver would otherwise poke itself
+	 * when given "airoha,configure-pcm-pins": with a pinctrl state
+	 * present it leaves 0x0104 alone.
+	 */
+
+	pcm1_pins: pcm1-pins {
+		mux {
+			function = "pcm";
+			groups = "pcm1";
+		};
+	};
+
+	pcm2_pins: pcm2-pins {
+		mux {
+			function = "pcm";
+			groups = "pcm2";
+		};
+	};
+
+	/* PCM bus 2 pins carrying the multiplexed SLIC control channel */
+	pcm_spi_pins: pcm-spi-pins {
+		mux {
+			function = "pcm_spi";
+			groups = "pcm_spi", "pcm_spi_rst";
+		};
+	};
+
+	pcm_spi_cs4_pins: pcm-spi-cs4-pins {
+		mux {
+			function = "pcm_spi";
+			groups = "pcm_spi_cs4";
+		};
+	};
+};
+
+/ {
 	pcm0: pcm@1fbd0000 {
 		compatible = "econet,en751221-pcm";
-		reg = <0x1fbd0000 0x1000>,
-		      <0x1fb00000 0x1000>,
-		      <0x1fa20000 0x1000>;
-		reg-names = "pcm", "sys", "chip";
-		/* interrupts = <12>; */
+		reg = <0x1fbd0000 0x1000>;
+		reg-names = "pcm";
+
+		/*
+		 * hwirq 12 does not map cleanly on this SoC -- the INTC
+		 * reports it as a shadow interrupt -- so the driver falls
+		 * back to a polling worker. Re-enable once the INTC
+		 * binding handles it.
+		 *
+		 * interrupts = <12>;
+		 */
+
+		airoha,scu = <&scuclk>;
+		airoha,chip-scu = <&chip_scu>;
+
+		/*
+		 * The SCU binding has no PCM reset line: econet,en751221-scu.h
+		 * defines FE, GSW, GDMA and XPON resets only. So the block
+		 * is reset through the raw bit in NP SCU 0x834 rather than
+		 * through "resets = <&scuclk ...>".
+		 */
+		airoha,pcm-reset-mask = <0x800>;	/* SCU 0x834 bit 11 */
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcm1_pins>;
+
+		/* read back from stock firmware; see docs/01 */
 		airoha,pcm-interface-control = <0xf5071306>;
+
+		/*
+		 * 16-bit slots at bit offsets 32, 48, 64, 80, 96, 112,
+		 * 128, 144. Two slots per register; low half is the even
+		 * slot, high half the odd one.
+		 */
 		airoha,tx-slot-config = <0x10301020 0x10501040
 					 0x10701060 0x10901080>;
 		airoha,rx-slot-config = <0x10301020 0x10501040
 					 0x10701060 0x10901080>;
+
 		status = "disabled";
 	};
 
+	/* Second PCM instance. Present in silicon; rarely wired up. */
+	pcm1: pcm@1fbd2000 {
+		compatible = "econet,en751221-pcm";
+		reg = <0x1fbd2000 0x1000>;
+		reg-names = "pcm";
+		airoha,scu = <&scuclk>;
+		airoha,chip-scu = <&chip_scu>;
+		airoha,pcm-reset-mask = <0x1000>;	/* SCU 0x834 bit 12 */
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcm2_pins>;
+		airoha,pcm-interface-control = <0xf5071306>;
+		status = "disabled";
+	};
+
+	/*
+	 * ZSI: the SLIC control channel multiplexed over the PCM bus.
+	 * It rides the pcm2 pins, so a board that enables this cannot
+	 * also mux pcm2 on pcm1 above.
+	 */
 	zsi0: zsi@1fbd1000 {
 		compatible = "econet,en751221-zsi";
-		reg = <0x1fbd1000 0x1000>,
-		      <0x1fb00000 0x1000>,
-		      <0x1fa20000 0x1000>;
-		reg-names = "zsi", "sys", "scu";
+		reg = <0x1fbd1000 0x1000>;
+		reg-names = "zsi";
+
+		airoha,scu = <&scuclk>;
+		airoha,chip-scu = <&chip_scu>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcm_spi_pins>;
+
 		#address-cells = <1>;
 		#size-cells = <0>;
-		status = "disabled";
 
-		slic0: slic@0 {
-			compatible = "microsemi,le9642";
-			reg = <0>;
-			econet,zsi = <&zsi0>;
-			econet,pcm = <&pcm0>;
-			econet,lines = <2>;
-			/*
-			 * PCM bus timeslots. The RX DMA channel is the
-			 * bus slot minus four, so 4 -> ch0 and 6 -> ch2;
-			 * two simultaneous lines must not share a slot.
-			 */
-			econet,bus-slots = <4 6>;
-			status = "disabled";
-		};
+		/*
+		 * Inter-byte gap. The wrapper acknowledges a byte as soon
+		 * as it has sent it, but the SLIC still has to clock it
+		 * over the 8 kHz bus. Below about 2000 us the SLIC
+		 * mis-parses profile streams.
+		 */
+		airoha,zsi-gap-us = <5000>;
+
+		status = "disabled";
 	};
 };

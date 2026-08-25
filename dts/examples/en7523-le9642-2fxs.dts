@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Example: EN7523 board with two FXS ports on a Le9642 over ZSI.
+ *
+ * The interesting part is the pin muxing. ZSI multiplexes the SLIC
+ * control channel onto the PCM pins, and the pinctrl driver models
+ * exactly that: the "pcm_spi" group covers all eight pins that "pcm1"
+ * and "pcm2" cover together. So this board claims pcm_spi_pins and
+ * must NOT also claim pcm1_pins -- the pinctrl core would reject the
+ * second request with the pins already taken.
+ *
+ * Muxing "pcm_spi_rst" (gpio2) makes the SLIC reset hardware driven,
+ * which is why there is no reset-gpios here.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+
+#include "en7523.dtsi"
+#include "en7523-voice.dtsi"
+
+/ {
+	model = "EN7523 with 2x FXS (Le9642, ZSI)";
+	compatible = "airoha,en7523";
+};
+
+&pcm0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcm_spi_pins>;
+	status = "okay";
+};
+
+&zsi0 {
+	status = "okay";
+
+	slic0: slic@0 {
+		compatible = "microsemi,le9642";
+		reg = <0>;
+
+		airoha,zsi = <&zsi0>;
+		airoha,pcm = <&pcm0>;
+		airoha,lines = <2>;
+
+		/*
+		 * PCM bus timeslots, not DMA channels: the RX DMA lands a
+		 * slot on channel (slot - 4). Two lines must not share a
+		 * slot -- the second one goes silent rather than failing
+		 * to probe.
+		 */
+		airoha,bus-slots = <4 6>;
+
+		status = "okay";
+	};
+};

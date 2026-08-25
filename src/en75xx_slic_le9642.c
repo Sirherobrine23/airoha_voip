@@ -592,12 +592,12 @@ static int le9642_probe(struct platform_device *pdev)
 	mutex_init(&slic->lock);
 	INIT_DELAYED_WORK(&slic->tick_work, le9642_tick_work);
 
-	slic->zsi = en75xx_zsi_get(dev, "econet,zsi");
+	slic->zsi = en75xx_zsi_get(dev, "airoha,zsi");
 	if (IS_ERR(slic->zsi))
 		return dev_err_probe(dev, PTR_ERR(slic->zsi),
 				     "no ZSI transport\n");
 
-	pcm_np = of_parse_phandle(np, "econet,pcm", 0);
+	pcm_np = of_parse_phandle(np, "airoha,pcm", 0);
 	if (pcm_np) {
 		slic->pcm = en75xx_pcm_get_by_fwnode(of_fwnode_handle(pcm_np));
 		of_node_put(pcm_np);
@@ -607,9 +607,9 @@ static int le9642_probe(struct platform_device *pdev)
 		goto err_zsi;
 	}
 
-	of_property_read_u32(np, "econet,lines", &n_lines);
-	of_property_read_u32_array(np, "econet,bus-slots", slots, 2);
-	slic->alaw = of_property_read_bool(np, "econet,a-law");
+	of_property_read_u32(np, "airoha,lines", &n_lines);
+	of_property_read_u32_array(np, "airoha,bus-slots", slots, 2);
+	slic->alaw = of_property_read_bool(np, "airoha,a-law");
 	slic->n_lines = clamp_val(n_lines, 1, 2);
 
 	for (i = 0; i < slic->n_lines; i++) {

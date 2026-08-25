@@ -26,6 +26,7 @@
 #include "../include/en75xx_voice.h"
 #include "en75xx_pcm_regs.h"
 #include "en75xx_g711.h"
+#include "en75xx_scu.h"
 
 #define EN75XX_SCU_CHIP_ID		0x064
 #define EN75XX_SCU_PCM_RESET		0x834
@@ -72,8 +73,8 @@ struct en75xx_pcm_dev {
 	struct device *dev;
 	const struct en75xx_pcm_soc_data *soc;
 	void __iomem *base;
-	void __iomem *sys;
-	void __iomem *chip;
+	struct en75xx_scu sys;		/* NP SCU:   reset          */
+	struct en75xx_scu chip;		/* chip SCU: pinmux, clock   */
 	int irq;
 	struct mutex lock;
 	struct delayed_work poll_work;
@@ -94,6 +95,7 @@ struct en75xx_pcm_dev {
 	bool running;
 	bool big_endian_samples;
 	bool configure_pins;
+	bool pinctrl_managed;
 	u64 dma_errors;
 };
 
@@ -134,15 +136,18 @@ static void en75xx_pcm_soft_reset(struct en75xx_pcm_dev *pcm)
 {
 	u32 val;
 
-	if (!pcm->sys)
+	if (!en75xx_scu_valid(&pcm->sys))
 		return;
 
-	val = readl(pcm->sys + EN75XX_SCU_PCM_RESET);
-	writel(val & ~pcm->reset_mask, pcm->sys + EN75XX_SCU_PCM_RESET);
+	val = en75xx_scu_read(&pcm->sys, EN75XX_SCU_PCM_RESET);
+	en75xx_scu_write(&pcm->sys, EN75XX_SCU_PCM_RESET,
+			 val & ~pcm->reset_mask);
 	usleep_range(5000, 6000);
-	writel(val | pcm->reset_mask, pcm->sys + EN75XX_SCU_PCM_RESET);
+	en75xx_scu_write(&pcm->sys, EN75XX_SCU_PCM_RESET,
+			 val | pcm->reset_mask);
 	usleep_range(5000, 6000);
-	writel(val & ~pcm->reset_mask, pcm->sys + EN75XX_SCU_PCM_RESET);
+	en75xx_scu_write(&pcm->sys, EN75XX_SCU_PCM_RESET,
+			 val & ~pcm->reset_mask);
 	usleep_range(5000, 6000);
 }
 
@@ -150,18 +155,25 @@ static void en75xx_pcm_clock_setup(struct en75xx_pcm_dev *pcm)
 {
 	u32 val;
 
-	if (!pcm->chip || !pcm->configure_pins)
+	/*
+	 * Skip the pinmux entirely when the device tree hands us a
+	 * pinctrl state: on an upstream tree the "pcm" function is
+	 * applied by the pinctrl core before probe, and writing IOMUX1
+	 * here would fight it.
+	 */
+	if (!en75xx_scu_valid(&pcm->chip) || !pcm->configure_pins ||
+	    pcm->pinctrl_managed)
 		return;
 
-	val = readl(pcm->chip + EN75XX_CHIP_SCU_IOMUX1);
-	writel(val | EN75XX_IOMUX_ZSI_ISI,
-	       pcm->chip + EN75XX_CHIP_SCU_IOMUX1);
+	val = en75xx_scu_read(&pcm->chip, EN75XX_CHIP_SCU_IOMUX1);
+	en75xx_scu_write(&pcm->chip, EN75XX_CHIP_SCU_IOMUX1,
+			 val | EN75XX_IOMUX_ZSI_ISI);
 
 	/* Vendor voice firmware uses the ZSI/PCM clock source and master output. */
-	val = readl(pcm->chip + EN75XX_CHIP_SCU_PCM_CLK_SRC);
-	writel(val | 0x1c, pcm->chip + EN75XX_CHIP_SCU_PCM_CLK_SRC);
-	writel(0x00000008, pcm->chip + EN75XX_CHIP_SCU_PCM_CLK_DIV);
-	writel(0x00a00301, pcm->chip + EN75XX_CHIP_SCU_PCM_CLK_OUT);
+	val = en75xx_scu_read(&pcm->chip, EN75XX_CHIP_SCU_PCM_CLK_SRC);
+	en75xx_scu_write(&pcm->chip, EN75XX_CHIP_SCU_PCM_CLK_SRC, val | 0x1c);
+	en75xx_scu_write(&pcm->chip, EN75XX_CHIP_SCU_PCM_CLK_DIV, 0x00000008);
+	en75xx_scu_write(&pcm->chip, EN75XX_CHIP_SCU_PCM_CLK_OUT, 0x00a00301);
 }
 
 /*
@@ -681,16 +693,6 @@ void en75xx_pcm_put(struct en75xx_pcm *pcm)
 }
 EXPORT_SYMBOL_GPL(en75xx_pcm_put);
 
-static void __iomem *en75xx_optional_ioremap(struct platform_device *pdev,
-					     const char *name)
-{
-	struct resource *res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
-
-	if (!res)
-		return NULL;
-	return devm_ioremap_resource(&pdev->dev, res);
-}
-
 static int en75xx_pcm_probe(struct platform_device *pdev)
 {
 	static const u32 default_slots[4] = {
@@ -716,12 +718,20 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 	if (IS_ERR(pcm->base))
 		return PTR_ERR(pcm->base);
 
-	pcm->sys = en75xx_optional_ioremap(pdev, "sys");
-	if (IS_ERR(pcm->sys))
-		return PTR_ERR(pcm->sys);
-	pcm->chip = en75xx_optional_ioremap(pdev, "chip");
-	if (IS_ERR(pcm->chip))
-		return PTR_ERR(pcm->chip);
+	ret = en75xx_scu_get(pdev, &pcm->sys, "airoha,scu", "sys");
+	if (ret)
+		return ret;
+	ret = en75xx_scu_get(pdev, &pcm->chip, "airoha,chip-scu", "chip");
+	if (ret)
+		return ret;
+
+	/*
+	 * The pinctrl core applies the "default" state before probe when
+	 * the node declares one. Recording that here keeps the driver
+	 * from also poking IOMUX1 behind its back.
+	 */
+	pcm->pinctrl_managed = dev->of_node &&
+		of_property_present(dev->of_node, "pinctrl-0");
 
 	mutex_init(&pcm->lock);
 	INIT_LIST_HEAD(&pcm->node);

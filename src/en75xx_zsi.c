@@ -33,6 +33,7 @@
 #include <linux/regmap.h>
 #include <linux/slab.h>
 
+#include "en75xx_scu.h"
 #include "en75xx_zsi.h"
 
 /* ZSI wrapper (0x1fbd1000 + id * 0x2000) */
@@ -86,8 +87,9 @@
 struct en75xx_zsi {
 	struct device		*dev;
 	void __iomem		*base;
-	void __iomem		*sys;
-	void __iomem		*scu;
+	struct en75xx_scu	sys;
+	struct en75xx_scu	scu;
+	bool			pinctrl_managed;
 	struct mutex		lock;
 	struct list_head	node;
 	unsigned int		gap_us;
@@ -162,30 +164,32 @@ int en75xx_zsi_hw_init(struct en75xx_zsi *zsi)
 {
 	u32 v;
 
-	if (!zsi->sys || !zsi->scu)
+	if (!en75xx_scu_valid(&zsi->sys) || !en75xx_scu_valid(&zsi->scu))
 		return -ENODEV;
 
 	mutex_lock(&zsi->lock);
 
 	/* interface route = ZSI */
-	v = readl(zsi->sys + SYS_IFACE_MODE);
-	v &= ~SYS_IFACE_MODE_MASK;
-	v |= SYS_IFACE_MODE_ZSI;
-	writel(v, zsi->sys + SYS_IFACE_MODE);
+	en75xx_scu_update(&zsi->sys, SYS_IFACE_MODE,
+			  SYS_IFACE_MODE_MASK, SYS_IFACE_MODE_ZSI);
 
-	/* pinmux: clear the SLIC field, select GPIO_ZSI_ISI */
-	v = readl(zsi->scu + SCU_IOMUX_CONTROL1);
-	v &= ~IOMUX1_SLIC_MASK;
-	v |= IOMUX1_GPIO_ZSI_ISI;
-	writel(v, zsi->scu + SCU_IOMUX_CONTROL1);
+	/*
+	 * Pinmux. Skipped when the device tree provides a pinctrl state:
+	 * on an upstream tree the "pcm" and "pcm_spi" functions are
+	 * applied by the pinctrl core, and writing IOMUX1 here would
+	 * fight it.
+	 */
+	if (!zsi->pinctrl_managed)
+		en75xx_scu_update(&zsi->scu, SCU_IOMUX_CONTROL1,
+				  IOMUX1_SLIC_MASK, IOMUX1_GPIO_ZSI_ISI);
 
 	/* PCM clock source = ZSI */
-	v = readl(zsi->scu + SCU_PCM_CLK_SRC_SEL);
-	writel(v | PCM_CLK_SRC_ZSI, zsi->scu + SCU_PCM_CLK_SRC_SEL);
+	v = en75xx_scu_read(&zsi->scu, SCU_PCM_CLK_SRC_SEL);
+	en75xx_scu_write(&zsi->scu, SCU_PCM_CLK_SRC_SEL, v | PCM_CLK_SRC_ZSI);
 
 	/* PCLK/FSYNC must run for the SLIC to answer at all */
-	writel(SCU_PCM_CLK_DIV_VAL, zsi->scu + SCU_PCM_CLK_DIV);
-	writel(SCU_PCM_CLK_OUT_VAL, zsi->scu + SCU_PCM_CLK_OUT);
+	en75xx_scu_write(&zsi->scu, SCU_PCM_CLK_DIV, SCU_PCM_CLK_DIV_VAL);
+	en75xx_scu_write(&zsi->scu, SCU_PCM_CLK_OUT, SCU_PCM_CLK_OUT_VAL);
 
 	/* wrapper config + enable */
 	writel(ZSI_CFG_VAL, zsi->base + ZSI_CFG);
@@ -204,16 +208,16 @@ void en75xx_zsi_slic_reset(struct en75xx_zsi *zsi)
 	u32 mask = SYS_RESET_SLIC0 | SYS_RESET_SLIC1;
 	u32 v;
 
-	if (!zsi->sys)
+	if (!en75xx_scu_valid(&zsi->sys))
 		return;
 
 	mutex_lock(&zsi->lock);
-	v = readl(zsi->sys + SYS_RESET);
-	writel(v & ~mask, zsi->sys + SYS_RESET);
+	v = en75xx_scu_read(&zsi->sys, SYS_RESET);
+	en75xx_scu_write(&zsi->sys, SYS_RESET, v & ~mask);
 	usleep_range(5000, 6000);
-	writel(v | mask, zsi->sys + SYS_RESET);
+	en75xx_scu_write(&zsi->sys, SYS_RESET, v | mask);
 	usleep_range(5000, 6000);
-	writel(v & ~mask, zsi->sys + SYS_RESET);
+	en75xx_scu_write(&zsi->sys, SYS_RESET, v & ~mask);
 	usleep_range(20000, 25000);
 
 	/* the reset drops the wrapper enable, put it back */
@@ -361,21 +365,11 @@ void en75xx_zsi_put(struct en75xx_zsi *zsi)
 }
 EXPORT_SYMBOL_GPL(en75xx_zsi_put);
 
-static void __iomem *zsi_map_named(struct platform_device *pdev,
-				   const char *name)
-{
-	struct resource *res;
-
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
-	if (!res)
-		return NULL;
-	return devm_ioremap_resource(&pdev->dev, res);
-}
-
 static int en75xx_zsi_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct en75xx_zsi *zsi;
+	int ret;
 
 	zsi = devm_kzalloc(dev, sizeof(*zsi), GFP_KERNEL);
 	if (!zsi)
@@ -392,17 +386,21 @@ static int en75xx_zsi_probe(struct platform_device *pdev)
 	if (IS_ERR(zsi->base))
 		return PTR_ERR(zsi->base);
 
-	zsi->sys = zsi_map_named(pdev, "sys");
-	if (IS_ERR(zsi->sys))
-		return PTR_ERR(zsi->sys);
-	zsi->scu = zsi_map_named(pdev, "scu");
-	if (IS_ERR(zsi->scu))
-		return PTR_ERR(zsi->scu);
+	ret = en75xx_scu_get(pdev, &zsi->sys, "airoha,scu", "sys");
+	if (ret)
+		return ret;
+	ret = en75xx_scu_get(pdev, &zsi->scu, "airoha,chip-scu", "scu");
+	if (ret)
+		return ret;
 
-	if (!zsi->sys || !zsi->scu) {
-		dev_err(dev, "need both the 'sys' and 'scu' reg ranges\n");
+	if (!en75xx_scu_valid(&zsi->sys) || !en75xx_scu_valid(&zsi->scu)) {
+		dev_err(dev,
+			"need the NP and chip SCU, as syscon phandles or reg ranges\n");
 		return -EINVAL;
 	}
+
+	zsi->pinctrl_managed = dev->of_node &&
+		of_property_present(dev->of_node, "pinctrl-0");
 
 	device_property_read_u32(dev, "airoha,zsi-gap-us", &zsi->gap_us);
 	if (zsi->gap_us < 500)
@@ -431,6 +429,8 @@ static void en75xx_zsi_remove(struct platform_device *pdev)
 
 static const struct of_device_id en75xx_zsi_of_match[] = {
 	{ .compatible = "econet,en751221-zsi" },
+	{ .compatible = "econet,en7528-zsi" },
+	{ .compatible = "airoha,en7523-zsi" },
 	{ .compatible = "econet,en75xx-zsi" },
 	{ }
 };

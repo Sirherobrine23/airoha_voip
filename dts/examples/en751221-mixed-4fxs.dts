@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Example: four FXS ports split across both PCM instances and two
+ * different SLIC families.
+ *
+ * Not a real product -- it exists to show the parts that are easy to
+ * get wrong when a board has more than two lines:
+ *
+ *   - each PCM instance has its own reset bit in SYS 0x834;
+ *   - bus slots are per PCM instance, so pcm1 can reuse 4 and 6;
+ *   - a ZSI SLIC and an SPI SLIC can coexist, but not on the same
+ *     PCM channel.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+
+#include "en751221.dtsi"
+#include "en751221-voice.dtsi"
+
+/ {
+	model = "EN751221 with 4x FXS (Le9642 + Si32192)";
+	compatible = "econet,en751221";
+};
+
+/* lines 1-2: Le9642 over ZSI on the first PCM block */
+&pcm0 {
+	status = "okay";
+};
+
+&zsi0 {
+	status = "okay";
+
+	slic0: slic@0 {
+		compatible = "microsemi,le9642";
+		reg = <0>;
+		airoha,zsi = <&zsi0>;
+		airoha,pcm = <&pcm0>;
+		airoha,lines = <2>;
+		airoha,bus-slots = <4 6>;
+		status = "okay";
+	};
+};
+
+/*
+ * Lines 3-4: Si32192 over SPI on the second PCM block.
+ *
+ * Note that the upstream en751221.dtsi has no SPI controller node at
+ * all -- unlike en7528.dtsi, which carries spi@1fa10000. On EN751221
+ * the SPI master has to be added before this half of the example can
+ * work; the &spi0 reference below is a placeholder for whatever label
+ * your tree ends up using.
+ */
+&pcm1 {
+	status = "okay";
+};
+
+&spi0 {
+	status = "okay";
+
+	proslic0: proslic@1 {
+		compatible = "silabs,si32192";
+		reg = <1>;
+		spi-max-frequency = <10000000>;
+		spi-cpha;
+		spi-cpol;
+		airoha,pcm = <&pcm1>;
+		airoha,pcm-channel = <0>;
+		reset-gpios = <&gpio 7 GPIO_ACTIVE_LOW>;
+		status = "okay";
+	};
+
+	proslic1: proslic@2 {
+		compatible = "silabs,si32192";
+		reg = <2>;
+		spi-max-frequency = <10000000>;
+		spi-cpha;
+		spi-cpol;
+		airoha,pcm = <&pcm1>;
+		airoha,pcm-channel = <2>;
+		status = "okay";
+	};
+};
