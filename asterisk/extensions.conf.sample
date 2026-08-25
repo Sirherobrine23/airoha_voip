@@ -1,0 +1,31 @@
+;
+; Minimal dialplan for two FXS lines plus a SIP trunk.
+;
+
+[fxs]
+; the other handset
+exten => 1001,1,Dial(EN75XX/0,30)
+ same  =>      n,Hangup()
+exten => 1002,1,Dial(EN75XX/1,30)
+ same  =>      n,Hangup()
+
+; echo test -- the fastest way to tell whether both audio directions work
+exten => 600,1,Answer()
+ same  =>     n,Wait(1)
+ same  =>     n,Playback(demo-echotest)
+ same  =>     n,Echo()
+ same  =>     n,Hangup()
+
+; talking clock, useful for checking the receive path alone
+exten => 601,1,Answer()
+ same  =>     n,SayUnixTime()
+ same  =>     n,Hangup()
+
+; everything else goes out the trunk
+exten => _X.,1,Dial(PJSIP/${EXTEN}@trunk,60)
+ same  =>     n,Hangup()
+
+[from-trunk]
+; ring both handsets
+exten => s,1,Dial(EN75XX/0&EN75XX/1,30)
+ same  =>   n,Hangup()

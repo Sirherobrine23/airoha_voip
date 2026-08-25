@@ -1,0 +1,33 @@
+;
+; chan_en75xx -- FXS lines on EcoNet/Airoha EN75xx
+;
+; One [lineN] section per /dev/en75xx-fxsN. N is the line number the
+; dialplan uses: Dial(EN75XX/0).
+;
+
+[general]
+; nothing here yet; kept so the file layout matches the other channel
+; drivers and so options can be added without breaking configs.
+
+[line0]
+; device      = /dev/en75xx-fxs0   ; default is /dev/en75xx-fxs<N>
+context       = fxs                ; where off-hook digits are matched
+callerid      = "Phone 1" <1001>
+language      = pt_BR
+
+; immediate=yes skips dial tone and digit collection entirely and jumps
+; straight to extension "s" in the context. Useful for a hot line.
+immediate     = no
+; extension   = s                  ; only used when immediate=yes
+
+; hardware_dtmf=yes disables the software DTMF detector. Leave it off:
+; neither the Le9642 nor the ProSLIC parts report digits out of band on
+; this platform, so the tones have to be pulled out of the audio.
+hardware_dtmf = no
+
+; mohinterpret = default
+
+[line1]
+context       = fxs
+callerid      = "Phone 2" <1002>
+language      = pt_BR

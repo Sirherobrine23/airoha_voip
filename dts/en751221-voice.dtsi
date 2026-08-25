@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Voice (PCM + ZSI + FXS) nodes for EN751221 boards.
+ *
+ * The PCM interrupt (hwirq 12) does not map cleanly on this SoC -- the
+ * INTC reports it as a shadow interrupt -- so the "interrupts" property
+ * is left commented out and the driver falls back to its polling
+ * worker. Uncomment it once the INTC binding handles hwirq 12.
+ */
+
+&soc {
+	pcm0: pcm@1fbd0000 {
+		compatible = "econet,en751221-pcm";
+		reg = <0x1fbd0000 0x1000>,
+		      <0x1fb00000 0x1000>,
+		      <0x1fa20000 0x1000>;
+		reg-names = "pcm", "sys", "chip";
+		/* interrupts = <12>; */
+		airoha,pcm-interface-control = <0xf5071306>;
+		airoha,tx-slot-config = <0x10301020 0x10501040
+					 0x10701060 0x10901080>;
+		airoha,rx-slot-config = <0x10301020 0x10501040
+					 0x10701060 0x10901080>;
+		status = "disabled";
+	};
+
+	zsi0: zsi@1fbd1000 {
+		compatible = "econet,en751221-zsi";
+		reg = <0x1fbd1000 0x1000>,
+		      <0x1fb00000 0x1000>,
+		      <0x1fa20000 0x1000>;
+		reg-names = "zsi", "sys", "scu";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "disabled";
+
+		slic0: slic@0 {
+			compatible = "microsemi,le9642";
+			reg = <0>;
+			econet,zsi = <&zsi0>;
+			econet,pcm = <&pcm0>;
+			econet,lines = <2>;
+			/*
+			 * PCM bus timeslots. The RX DMA channel is the
+			 * bus slot minus four, so 4 -> ch0 and 6 -> ch2;
+			 * two simultaneous lines must not share a slot.
+			 */
+			econet,bus-slots = <4 6>;
+			status = "disabled";
+		};
+	};
+};
