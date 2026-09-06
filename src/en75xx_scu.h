@@ -35,35 +35,44 @@ static inline bool en75xx_scu_valid(const struct en75xx_scu *scu)
 	return scu->map || scu->base;
 }
 
-static inline u32 en75xx_scu_read(const struct en75xx_scu *scu, u32 off)
+static inline int en75xx_scu_read(const struct en75xx_scu *scu, u32 off,
+				  u32 *val)
 {
-	u32 val = 0;
-
 	if (scu->map)
-		regmap_read(scu->map, off, &val);
-	else if (scu->base)
-		val = readl(scu->base + off);
+		return regmap_read(scu->map, off, val);
+	if (scu->base) {
+		*val = readl(scu->base + off);
+		return 0;
+	}
 
-	return val;
+	return -ENODEV;
 }
 
-static inline void en75xx_scu_write(const struct en75xx_scu *scu, u32 off,
-				    u32 val)
+static inline int en75xx_scu_write(const struct en75xx_scu *scu, u32 off,
+				   u32 val)
 {
 	if (scu->map)
-		regmap_write(scu->map, off, val);
-	else if (scu->base)
+		return regmap_write(scu->map, off, val);
+	if (scu->base) {
 		writel(val, scu->base + off);
+		return 0;
+	}
+
+	return -ENODEV;
 }
 
-static inline void en75xx_scu_update(const struct en75xx_scu *scu, u32 off,
-				     u32 mask, u32 val)
+static inline int en75xx_scu_update(const struct en75xx_scu *scu, u32 off,
+				    u32 mask, u32 val)
 {
 	if (scu->map)
-		regmap_update_bits(scu->map, off, mask, val);
-	else if (scu->base)
+		return regmap_update_bits(scu->map, off, mask, val);
+	if (scu->base) {
 		writel((readl(scu->base + off) & ~mask) | (val & mask),
 		       scu->base + off);
+		return 0;
+	}
+
+	return -ENODEV;
 }
 
 /*

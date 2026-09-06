@@ -347,10 +347,13 @@ static int le9642_audio_setup(struct le9642_slic *slic,
 	if (ret)
 		return ret;
 
-	if (slic->pcm && slic->pcm->line_ops->set_format)
-		slic->pcm->line_ops->set_format(slic->pcm, line->pcm_channel,
+	if (slic->pcm && slic->pcm->line_ops->set_format) {
+		ret = slic->pcm->line_ops->set_format(slic->pcm, line->pcm_channel,
 			slic->alaw ? EN75XX_PCM_CODEC_ALAW
 				   : EN75XX_PCM_CODEC_ULAW, tx_msb);
+		if (ret)
+			return ret;
+	}
 
 	dev_dbg(slic->dev, "EC_%u audio up: slot %u, dma ch %u, %s\n",
 		line->ec, line->bus_slot, line->pcm_channel,
@@ -547,7 +550,9 @@ static int le9642_bringup(struct le9642_slic *slic)
 	if (ret)
 		return ret;
 
-	en75xx_zsi_slic_reset(slic->zsi);
+	ret = en75xx_zsi_slic_reset(slic->zsi);
+	if (ret)
+		return ret;
 
 	ret = le9642_detect(slic);
 	if (ret)
@@ -611,6 +616,18 @@ static int le9642_probe(struct platform_device *pdev)
 	of_property_read_u32_array(np, "airoha,bus-slots", slots, 2);
 	slic->alaw = of_property_read_bool(np, "airoha,a-law");
 	slic->n_lines = clamp_val(n_lines, 1, 2);
+	for (i = 0; i < slic->n_lines; i++) {
+		if (slots[i] < 4 || slots[i] >= 4 + EN75XX_PCM_MAX_CHANNELS) {
+			ret = dev_err_probe(dev, -EINVAL,
+				"invalid PCM bus slot %u for line %u\n", slots[i], i);
+			goto err_pcm;
+		}
+		if (i && slots[i] == slots[0]) {
+			ret = dev_err_probe(dev, -EINVAL,
+				"PCM bus slots must be unique\n");
+			goto err_pcm;
+		}
+	}
 
 	for (i = 0; i < slic->n_lines; i++) {
 		struct le9642_line *line = &slic->line[i];

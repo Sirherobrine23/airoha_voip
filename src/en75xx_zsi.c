@@ -21,6 +21,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/mfd/syscon.h>
@@ -31,6 +32,7 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
+#include <linux/reset.h>
 #include <linux/slab.h>
 
 #include "en75xx_scu.h"
@@ -50,17 +52,12 @@
 #define ZSI_EN_VAL			0x19
 
 /* SYS block (0x1fb00000) */
-#define SYS_CHIP_ID			0x064
 #define SYS_IFACE_MODE			0x094
 #define  SYS_IFACE_MODE_MASK		GENMASK(3, 0)
 #define  SYS_IFACE_MODE_ZSI		0x5
 #define SYS_RESET			0x834
 #define  SYS_RESET_SLIC0		BIT(0)
-#define  SYS_RESET_SLIC1		BIT(17)
-/*
- * Bit 25 is the *SPI* reset. Toggling it here looks like it works and
- * then leaves the SLIC unreachable; the SLIC lines are bit 0 and 17.
- */
+/* Bit 25 is SFC2/PCM reset, not a ZSI/SLIC reset. */
 
 /* Chip SCU block (0x1fa20000) */
 #define SCU_IOMUX_CONTROL1		0x104
@@ -87,8 +84,11 @@
 struct en75xx_zsi {
 	struct device		*dev;
 	void __iomem		*base;
+	struct clk		*slic_clk;
+	struct reset_control	*rst;
 	struct en75xx_scu	sys;
 	struct en75xx_scu	scu;
+	bool			legacy_scu;
 	bool			pinctrl_managed;
 	struct mutex		lock;
 	struct list_head	node;
@@ -163,33 +163,50 @@ static int zsi_read_byte(struct en75xx_zsi *zsi, u8 *v)
 int en75xx_zsi_hw_init(struct en75xx_zsi *zsi)
 {
 	u32 v;
+	int ret;
 
-	if (!en75xx_scu_valid(&zsi->sys) || !en75xx_scu_valid(&zsi->scu))
+	if (zsi->legacy_scu &&
+	    (!en75xx_scu_valid(&zsi->sys) || !en75xx_scu_valid(&zsi->scu)))
 		return -ENODEV;
 
 	mutex_lock(&zsi->lock);
 
-	/* interface route = ZSI */
-	en75xx_scu_update(&zsi->sys, SYS_IFACE_MODE,
-			  SYS_IFACE_MODE_MASK, SYS_IFACE_MODE_ZSI);
-
 	/*
-	 * Pinmux. Skipped when the device tree provides a pinctrl state:
-	 * on an upstream tree the "pcm" and "pcm_spi" functions are
-	 * applied by the pinctrl core, and writing IOMUX1 here would
-	 * fight it.
+	 * This raw layout is verified only on EN751221 and is therefore an
+	 * explicit compatibility mode. New device trees use the pinctrl,
+	 * reset and clock providers. EN7523 has different clock registers and
+	 * must never execute this sequence.
 	 */
-	if (!zsi->pinctrl_managed)
-		en75xx_scu_update(&zsi->scu, SCU_IOMUX_CONTROL1,
-				  IOMUX1_SLIC_MASK, IOMUX1_GPIO_ZSI_ISI);
+	if (zsi->legacy_scu) {
+		ret = en75xx_scu_update(&zsi->sys, SYS_IFACE_MODE,
+					SYS_IFACE_MODE_MASK, SYS_IFACE_MODE_ZSI);
+		if (ret)
+			goto out_unlock;
 
-	/* PCM clock source = ZSI */
-	v = en75xx_scu_read(&zsi->scu, SCU_PCM_CLK_SRC_SEL);
-	en75xx_scu_write(&zsi->scu, SCU_PCM_CLK_SRC_SEL, v | PCM_CLK_SRC_ZSI);
+		if (!zsi->pinctrl_managed) {
+			ret = en75xx_scu_update(&zsi->scu, SCU_IOMUX_CONTROL1,
+						IOMUX1_SLIC_MASK,
+						IOMUX1_GPIO_ZSI_ISI);
+			if (ret)
+				goto out_unlock;
+		}
 
-	/* PCLK/FSYNC must run for the SLIC to answer at all */
-	en75xx_scu_write(&zsi->scu, SCU_PCM_CLK_DIV, SCU_PCM_CLK_DIV_VAL);
-	en75xx_scu_write(&zsi->scu, SCU_PCM_CLK_OUT, SCU_PCM_CLK_OUT_VAL);
+		ret = en75xx_scu_read(&zsi->scu, SCU_PCM_CLK_SRC_SEL, &v);
+		if (ret)
+			goto out_unlock;
+		ret = en75xx_scu_write(&zsi->scu, SCU_PCM_CLK_SRC_SEL,
+					 v | PCM_CLK_SRC_ZSI);
+		if (ret)
+			goto out_unlock;
+		ret = en75xx_scu_write(&zsi->scu, SCU_PCM_CLK_DIV,
+					 SCU_PCM_CLK_DIV_VAL);
+		if (ret)
+			goto out_unlock;
+		ret = en75xx_scu_write(&zsi->scu, SCU_PCM_CLK_OUT,
+					 SCU_PCM_CLK_OUT_VAL);
+		if (ret)
+			goto out_unlock;
+	}
 
 	/* wrapper config + enable */
 	writel(ZSI_CFG_VAL, zsi->base + ZSI_CFG);
@@ -200,29 +217,53 @@ int en75xx_zsi_hw_init(struct en75xx_zsi *zsi)
 
 	dev_dbg(zsi->dev, "ZSI mode selected, wrapper enabled\n");
 	return 0;
+
+out_unlock:
+	mutex_unlock(&zsi->lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(en75xx_zsi_hw_init);
 
-void en75xx_zsi_slic_reset(struct en75xx_zsi *zsi)
+int en75xx_zsi_slic_reset(struct en75xx_zsi *zsi)
 {
-	u32 mask = SYS_RESET_SLIC0 | SYS_RESET_SLIC1;
+	u32 mask = SYS_RESET_SLIC0;
 	u32 v;
+	int ret;
 
-	if (!en75xx_scu_valid(&zsi->sys))
-		return;
+	if (zsi->rst) {
+		ret = reset_control_reset(zsi->rst);
+		if (ret)
+			return ret;
+		usleep_range(20000, 25000);
+		return 0;
+	}
+
+	if (!zsi->legacy_scu || !en75xx_scu_valid(&zsi->sys))
+		return 0;
 
 	mutex_lock(&zsi->lock);
-	v = en75xx_scu_read(&zsi->sys, SYS_RESET);
-	en75xx_scu_write(&zsi->sys, SYS_RESET, v & ~mask);
+	ret = en75xx_scu_read(&zsi->sys, SYS_RESET, &v);
+	if (ret)
+		goto out_unlock;
+	ret = en75xx_scu_write(&zsi->sys, SYS_RESET, v & ~mask);
+	if (ret)
+		goto out_unlock;
 	usleep_range(5000, 6000);
-	en75xx_scu_write(&zsi->sys, SYS_RESET, v | mask);
+	ret = en75xx_scu_write(&zsi->sys, SYS_RESET, v | mask);
+	if (ret)
+		goto out_unlock;
 	usleep_range(5000, 6000);
-	en75xx_scu_write(&zsi->sys, SYS_RESET, v & ~mask);
+	ret = en75xx_scu_write(&zsi->sys, SYS_RESET, v & ~mask);
+	if (ret)
+		goto out_unlock;
 	usleep_range(20000, 25000);
 
 	/* the reset drops the wrapper enable, put it back */
 	writel(readl(zsi->base + ZSI_EN) | ZSI_EN_VAL, zsi->base + ZSI_EN);
+
+out_unlock:
 	mutex_unlock(&zsi->lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(en75xx_zsi_slic_reset);
 
@@ -343,6 +384,7 @@ struct en75xx_zsi *en75xx_zsi_get(struct device *dev, const char *phandle_name)
 	mutex_lock(&en75xx_zsi_list_lock);
 	list_for_each_entry(zsi, &en75xx_zsi_list, node) {
 		if (zsi->dev->of_node == np) {
+			get_device(zsi->dev);
 			found = zsi;
 			break;
 		}
@@ -353,7 +395,6 @@ struct en75xx_zsi *en75xx_zsi_get(struct device *dev, const char *phandle_name)
 	if (!found)
 		return ERR_PTR(-EPROBE_DEFER);
 
-	get_device(found->dev);
 	return found;
 }
 EXPORT_SYMBOL_GPL(en75xx_zsi_get);
@@ -379,6 +420,8 @@ static int en75xx_zsi_probe(struct platform_device *pdev)
 	mutex_init(&zsi->lock);
 	INIT_LIST_HEAD(&zsi->node);
 	zsi->gap_us = zsi_gap_us;
+	zsi->legacy_scu = device_property_read_bool(dev,
+						   "airoha,legacy-scu-programming");
 
 	zsi->base = devm_platform_ioremap_resource_byname(pdev, "zsi");
 	if (IS_ERR(zsi->base))
@@ -386,18 +429,31 @@ static int en75xx_zsi_probe(struct platform_device *pdev)
 	if (IS_ERR(zsi->base))
 		return PTR_ERR(zsi->base);
 
-	ret = en75xx_scu_get(pdev, &zsi->sys, "airoha,scu", "sys");
-	if (ret)
-		return ret;
-	ret = en75xx_scu_get(pdev, &zsi->scu, "airoha,chip-scu", "scu");
-	if (ret)
-		return ret;
+	if (zsi->legacy_scu) {
+		if (!of_device_is_compatible(dev->of_node, "econet,en751221-zsi"))
+			return dev_err_probe(dev, -EINVAL,
+				"legacy SCU programming is verified only on EN751221\n");
 
-	if (!en75xx_scu_valid(&zsi->sys) || !en75xx_scu_valid(&zsi->scu)) {
-		dev_err(dev,
-			"need the NP and chip SCU, as syscon phandles or reg ranges\n");
-		return -EINVAL;
+		ret = en75xx_scu_get(pdev, &zsi->sys, "airoha,scu", "sys");
+		if (ret)
+			return ret;
+		ret = en75xx_scu_get(pdev, &zsi->scu, "airoha,chip-scu", "scu");
+		if (ret)
+			return ret;
+		if (!en75xx_scu_valid(&zsi->sys) ||
+		    !en75xx_scu_valid(&zsi->scu))
+			return dev_err_probe(dev, -EINVAL,
+				"legacy mode needs NP and chip SCU mappings\n");
 	}
+
+	zsi->rst = devm_reset_control_get_optional_exclusive(dev, "zsi");
+	if (IS_ERR(zsi->rst))
+		return dev_err_probe(dev, PTR_ERR(zsi->rst),
+				     "cannot get ZSI reset\n");
+	zsi->slic_clk = devm_clk_get_optional_enabled(dev, "slic");
+	if (IS_ERR(zsi->slic_clk))
+		return dev_err_probe(dev, PTR_ERR(zsi->slic_clk),
+				     "cannot enable SLIC clock\n");
 
 	zsi->pinctrl_managed = dev->of_node &&
 		of_property_present(dev->of_node, "pinctrl-0");
@@ -411,9 +467,16 @@ static int en75xx_zsi_probe(struct platform_device *pdev)
 	mutex_unlock(&en75xx_zsi_list_lock);
 
 	platform_set_drvdata(pdev, zsi);
-	dev_info(dev, "ZSI transport ready (gap %u us)\n", zsi->gap_us);
+	dev_info(dev, "ZSI transport ready (gap %u us%s)\n", zsi->gap_us,
+		 zsi->legacy_scu ? ", legacy SCU" : "");
 
-	of_platform_populate(dev->of_node, NULL, NULL, dev);
+	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
+	if (ret) {
+		mutex_lock(&en75xx_zsi_list_lock);
+		list_del_init(&zsi->node);
+		mutex_unlock(&en75xx_zsi_list_lock);
+		return dev_err_probe(dev, ret, "cannot populate ZSI children\n");
+	}
 	return 0;
 }
 

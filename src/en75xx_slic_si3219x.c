@@ -204,13 +204,13 @@ static void si3219x_control_init(struct en75xx_si3219x *slic)
 static int en75xx_si3219x_get_hook(void *priv)
 {
 	struct en75xx_si3219x *slic = priv;
-	uInt8 hook = ONHOOK;
+	uInt8 hook = PROSLIC_ONHOOK;
 	int ret;
 
 	ret = ProSLIC_ReadHookStatus(slic->channel, &hook);
 	if (ret != RC_NONE)
 		return -EIO;
-	return hook == OFFHOOK;
+	return hook == PROSLIC_OFFHOOK;
 }
 
 static int en75xx_si3219x_set_linefeed(void *priv,

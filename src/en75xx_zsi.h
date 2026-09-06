@@ -23,8 +23,8 @@ void en75xx_zsi_put(struct en75xx_zsi *zsi);
 /* Bring the SoC into ZSI mode: route, pinmux, PCM clock, wrapper enable. */
 int en75xx_zsi_hw_init(struct en75xx_zsi *zsi);
 
-/* Toggle the SLIC reset lines (NOT the SPI reset bit). */
-void en75xx_zsi_slic_reset(struct en75xx_zsi *zsi);
+/* Pulse the reset associated with this ZSI/SLIC path. */
+int en75xx_zsi_slic_reset(struct en75xx_zsi *zsi);
 
 /*
  * Stream one raw MPI section. Each opcode self-delimits: the SLIC

@@ -22,10 +22,10 @@ The allocation size matches, but the **stride** does not. Both
 generations index their rings by a fixed multiplier, and the two
 multipliers are different:
 
-| SoC | alloc | stride | descriptors |
-|-----|-------|--------|-------------|
+| SoC                        | alloc                     | stride          | descriptors       |
+| -------------------------- | ------------------------- | --------------- | ----------------- |
 | EN751221, EN7528 (MIPS BE) | `pcmKmalloc(0x21c)` = 540 | `n * 0x24` = 36 | 540 / 36 = **15** |
-| EN7523 (ARM LE) | `pcmKmalloc(0xb4)` = 180 | `n * 0x0c` = 12 | 180 / 12 = **15** |
+| EN7523 (ARM LE)            | `pcmKmalloc(0xb4)` = 180  | `n * 0x0c` = 12 | 180 / 12 = **15** |
 
 So it is 15 descriptors in both cases; what changes is how wide each one
 is. Three independent places in the EN7523 decompile use the 12-byte
@@ -75,12 +75,12 @@ which is what the draft's UAPI already said.
 
 ## Other values worth pinning
 
-| Thing | gen1 | gen2 | note |
-|-------|------|------|------|
-| `RING_CFG` (0x3c) | `0x9f` | `0x3f` | reset is `0xc0`; with `0xc0` the RX OWN bit never clears |
-| ring base encoding | `phys & 0x1fffffff` | `(phys & 0x3fffffff) \| 0x80000000` | |
-| `IFACE_CTRL` | `0xf5071306` observed on stock | computed default `0x00051306` | the two differ in bits 31..24 and bit 17 |
-| buffer stride | `d * 8 + ch` | same | 8-channel layout even when the mask enables 4 |
+| Thing              | gen1                           | gen2                                | note                                                     |
+| ------------------ | ------------------------------ | ----------------------------------- | -------------------------------------------------------- |
+| `RING_CFG` (0x3c)  | `0x9f`                         | `0x3f`                              | reset is `0xc0`; with `0xc0` the RX OWN bit never clears |
+| ring base encoding | `phys & 0x1fffffff`            | `(phys & 0x3fffffff) \| 0x80000000` |                                                          |
+| `IFACE_CTRL`       | `0xf5071306` observed on stock | computed default `0x00051306`       | the two differ in bits 31..24 and bit 17                 |
+| buffer stride      | `d * 8 + ch`                   | same                                | 8-channel layout even when the mask enables 4            |
 
 The `IFACE_CTRL` gap is not resolved. `0xf5071306` is a read-back from a
 running stock EN751221, while `0x00051306` is what the vendor's own

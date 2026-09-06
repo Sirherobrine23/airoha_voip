@@ -39,7 +39,7 @@ DTS snippet in `dts/en751221-voice.dtsi` now uses the same numbers.
 SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_IB_NF | SND_SOC_DAIFMT_CBS_CFS
 ```
 
-`DSP_A` means data starts one bit clock *after* frame sync. That is the
+`DSP_A` means data starts one bit clock _after_ frame sync. That is the
 same convention as bit 12 of `IFACE_CTRL`, which the EcoNet vendor
 driver sets unconditionally and has a dedicated helper for
 (`pcmBitDelaySet`). Two unrelated vendors landing on the same delay is a
@@ -74,11 +74,11 @@ different mux bit.
 **That does not generalise across the family**, which is worth stating
 plainly because the EN7523 evidence alone reads like it does:
 
-| SoC | `pcm_spi` pins | overlap with PCM buses |
-|-----|----------------|------------------------|
-| EN7523 | 16-19, 24-27 | both |
-| EN751221 | 17-20 | pcm2 only |
-| EN7528 | 4-7 | none |
+| SoC      | `pcm_spi` pins | overlap with PCM buses |
+| -------- | -------------- | ---------------------- |
+| EN7523   | 16-19, 24-27   | both                   |
+| EN751221 | 17-20          | pcm2 only              |
+| EN7528   | 4-7            | none                   |
 
 EN751221 is the part the ZSI work was proven on, and there the control
 channel does share the pcm2 pins -- consistent with the register-side

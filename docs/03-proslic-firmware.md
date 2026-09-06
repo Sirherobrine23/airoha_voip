@@ -67,10 +67,10 @@ allocated native-endian arrays rather than pointing at the blob.
 
 Two details that would bite otherwise:
 
-* `ProSLIC_LoadPatchData()` walks `patchData` until it hits a zero, and
+- `ProSLIC_LoadPatchData()` walks `patchData` until it hits a zero, and
   `ProSLIC_LoadSupportRAM()` walks `psRamAddr` the same way. The
   terminators are preserved and the loader verifies they survived.
-* Si3217x rev B ships only the 8 low jump-table entries, but the API
+- Si3217x rev B ships only the 8 low jump-table entries, but the API
   indexes `patchEntries[8]` unconditionally. The payload is padded to 16
   and the real count is kept in the header.
 

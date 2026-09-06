@@ -89,17 +89,10 @@
 			reg = <0x1fbd0000 0x1000>;
 			reg-names = "pcm";
 
-			/* interrupts = <12>; see the EN751221 note */
+			interrupts = <GIC_SHARED 11 IRQ_TYPE_LEVEL_HIGH>;
 
-			airoha,scu = <&scuclk>;
-			airoha,chip-scu = <&chip_scu>;
-
-			/*
-			 * econet,en7528-scu.h defines FE, GSW, GDMP and
-			 * XPON resets only -- no PCM line -- so the block
-			 * is reset through the raw bit in NP SCU 0x834.
-			 */
-			airoha,pcm-reset-mask = <0x800>;
+			resets = <&scuclk EN7528_PCM1_RST>;
+			reset-names = "pcm";
 
 			pinctrl-names = "default";
 			pinctrl-0 = <&pcm1_pins>;
@@ -110,6 +103,7 @@
 						 0x10701060 0x10901080>;
 			airoha,rx-slot-config = <0x10301020 0x10501040
 						 0x10701060 0x10901080>;
+			airoha,dma-channel-mask = <0xff>;
 
 			status = "disabled";
 		};
@@ -118,9 +112,9 @@
 			compatible = "econet,en7528-pcm";
 			reg = <0x1fbd2000 0x1000>;
 			reg-names = "pcm";
-			airoha,scu = <&scuclk>;
-			airoha,chip-scu = <&chip_scu>;
-			airoha,pcm-reset-mask = <0x1000>;
+			interrupts = <GIC_SHARED 32 IRQ_TYPE_LEVEL_HIGH>;
+			resets = <&scuclk EN7528_PCM2_RST>;
+			reset-names = "pcm";
 			pinctrl-names = "default";
 			pinctrl-0 = <&pcm2_pins>;
 			airoha,pcm-interface-control = <0xf5071306>;
@@ -132,8 +126,8 @@
 			reg = <0x1fbd1000 0x1000>;
 			reg-names = "zsi";
 
-			airoha,scu = <&scuclk>;
-			airoha,chip-scu = <&chip_scu>;
+			resets = <&scuclk EN7528_PCM1_ZSI_ISI_RST>;
+			reset-names = "zsi";
 
 			pinctrl-names = "default";
 			pinctrl-0 = <&pcm_spi_pins>, <&pcm_spi_cs1_pins>;

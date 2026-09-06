@@ -19,11 +19,11 @@ Asterisk only sees 8 kHz signed-linear audio plus four ioctls.
 
 ## Threads
 
-| Thread | Owns |
-|--------|------|
-| monitor | polls every line for `POLLPRI` and turns hook changes into channel events |
-| ss_thread | one per outgoing call: dial tone, digit collection, `ast_pbx_run` |
-| channel | Asterisk's own; does `read()`/`write()` on the same fd |
+| Thread    | Owns                                                                      |
+| --------- | ------------------------------------------------------------------------- |
+| monitor   | polls every line for `POLLPRI` and turns hook changes into channel events |
+| ss_thread | one per outgoing call: dial tone, digit collection, `ast_pbx_run`         |
+| channel   | Asterisk's own; does `read()`/`write()` on the same fd                    |
 
 The monitor and the channel thread share one fd deliberately. The
 monitor only ever polls `POLLPRI` and issues ioctls; the channel thread

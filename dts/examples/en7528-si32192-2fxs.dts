@@ -22,6 +22,7 @@
 };
 
 &pcm0 {
+	airoha,dma-channel-mask = <0x05>;
 	status = "okay";
 };
 
@@ -49,7 +50,7 @@
 		airoha,pcm = <&pcm0>;
 		airoha,pcm-channel = <0>;
 
-		reset-gpios = <&gpio 7 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&pinctrl 7 GPIO_ACTIVE_LOW>;
 
 		status = "okay";
 	};

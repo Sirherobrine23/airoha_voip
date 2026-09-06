@@ -6,7 +6,7 @@
  * Not a real product -- it exists to show the parts that are easy to
  * get wrong when a board has more than two lines:
  *
- *   - each PCM instance has its own reset bit in SYS 0x834;
+ *   - each PCM instance uses its reset-controller ID;
  *   - bus slots are per PCM instance, so pcm1 can reuse 4 and 6;
  *   - a ZSI SLIC and an SPI SLIC can coexist, but not on the same
  *     PCM channel.
@@ -26,6 +26,7 @@
 
 /* lines 1-2: Le9642 over ZSI on the first PCM block */
 &pcm0 {
+	airoha,dma-channel-mask = <0x05>;
 	status = "okay";
 };
 
@@ -46,13 +47,12 @@
 /*
  * Lines 3-4: Si32192 over SPI on the second PCM block.
  *
- * Note that the upstream en751221.dtsi has no SPI controller node at
- * all -- unlike en7528.dtsi, which carries spi@1fa10000. On EN751221
- * the SPI master has to be added before this half of the example can
- * work; the &spi0 reference below is a placeholder for whatever label
- * your tree ends up using.
+ * The base en751221.dtsi has no SPI controller node. The voice fragment
+ * adds the one-range EN751221 instance used by the unified SFC/SNFI
+ * driver, so &spi0 below is a real label rather than a placeholder.
  */
 &pcm1 {
+	airoha,dma-channel-mask = <0x05>;
 	status = "okay";
 };
 
@@ -67,7 +67,7 @@
 		spi-cpol;
 		airoha,pcm = <&pcm1>;
 		airoha,pcm-channel = <0>;
-		reset-gpios = <&gpio 7 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&pinctrl 7 GPIO_ACTIVE_LOW>;
 		status = "okay";
 	};
 

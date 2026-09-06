@@ -37,10 +37,11 @@ en75xx-slic-si3219x-objs   := en75xx_slic_si3219x.o en75xx_proslic_fw.o \
 	$(PROSLIC_DIR)/custom/si3219x_LCCB_constants.o
 
 ccflags-y += -I$(src)/../include
-ccflags-y += -DSI3219X -DENABLE_DEBUG
+ccflags-y += -I$(src)/$(PROSLIC_DIR)/inc
+ccflags-y += -I$(src)/$(PROSLIC_DIR)/custom
+ccflags-y += -DSI3219X -DPROSLIC_LINUX_KERNEL
 
 # The vendor API predates a few warnings that are errors in modern trees.
 CFLAGS_proslic.o                  += -Wno-unused-but-set-variable
+CFLAGS_proslic.o                  += -Wno-missing-prototypes
 CFLAGS_si3219x_intf.o             += -Wno-unused-but-set-variable
-$(addprefix CFLAGS_,$(notdir $(en75xx-slic-si3219x-objs))) += \
-	-I$(src)/$(PROSLIC_DIR)/inc -I$(src)/$(PROSLIC_DIR)/custom

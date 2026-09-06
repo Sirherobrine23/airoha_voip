@@ -1,8 +1,8 @@
 # Airoha/EcoNet pinctrl, clocks, resets, and VoIP/FXS porting gaps
 
-**Language:** English (United States)  
-**Primary source:** `linux(1).tgz`, Git revision `8f909dac6c5aca0a9c936ce0966a7dce56837427` (`fix ppe in en751221`)  
-**Compared against:** the previous `analise_voip_fxs_airoha_econet.md` report produced from `sdk_base.tgz`  
+**Language:** English (United States)
+**Primary source:** `linux(1).tgz`, Git revision `8f909dac6c5aca0a9c936ce0966a7dce56837427` (`fix ppe in en751221`)
+**Compared against:** the previous `analise_voip_fxs_airoha_econet.md` report produced from `sdk_base.tgz`
 **Analysis date:** 2026-08-28
 
 ## 1. Purpose and scope
@@ -51,30 +51,30 @@ This tree does not contain a complete PCM engine driver. The report therefore di
 
 ## 3. Current material reviewed
 
-| Area | Relevant files |
-|---|---|
-| Pinctrl/GPIO/IRQ core | `drivers/pinctrl/airoha/pinctrl-airoha.c`, `airoha-common.h` |
-| SoC drivers | `pinctrl-en751221.c`, `pinctrl-en7528.c`, `pinctrl-en7523.c`, `pinctrl-an7563.c`, `pinctrl-an7581.c`, `pinctrl-an7583.c` |
-| Bindings | `Documentation/devicetree/bindings/pinctrl/{econet,en751221;airoha,en7523;airoha,en7581;airoha,an7563;airoha,an7583}-pinctrl.yaml` |
-| DTS files | `arch/mips/boot/dts/econet/{en751221,en7528}.dtsi`, `arch/arm/boot/dts/airoha/en7523.dtsi`, `arch/arm64/boot/dts/airoha/en7581.dtsi` |
-| Clock/reset | `drivers/clk/clk-en7523.c`, `include/dt-bindings/{clock,reset}/...` |
+| Area                  | Relevant files                                                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Pinctrl/GPIO/IRQ core | `drivers/pinctrl/airoha/pinctrl-airoha.c`, `airoha-common.h`                                                                         |
+| SoC drivers           | `pinctrl-en751221.c`, `pinctrl-en7528.c`, `pinctrl-en7523.c`, `pinctrl-an7563.c`, `pinctrl-an7581.c`, `pinctrl-an7583.c`             |
+| Bindings              | `Documentation/devicetree/bindings/pinctrl/{econet,en751221;airoha,en7523;airoha,en7581;airoha,an7563;airoha,an7583}-pinctrl.yaml`   |
+| DTS files             | `arch/mips/boot/dts/econet/{en751221,en7528}.dtsi`, `arch/arm/boot/dts/airoha/en7523.dtsi`, `arch/arm64/boot/dts/airoha/en7581.dtsi` |
+| Clock/reset           | `drivers/clk/clk-en7523.c`, `include/dt-bindings/{clock,reset}/...`                                                                  |
 
 Kconfig contains selectable variants for EN751221, EN7528, EN7523, AN7563, “AN7581,” and AN7583. For the 7581 variant, the file and Kconfig symbol say AN7581 while the implemented compatible says EN7581.
 
 ## 4. Current state versus FXS requirements
 
-| Component | Current kernel | Porting requirement |
-|---|---|---|
-| PCM1/PCM2 pinctrl | Implemented for all six targets | Select board-specific groups and validate conflicts |
-| PCM-SPI pinctrl | Implemented on EN751221, EN7528, EN7523, EN7581, and AN7583 | AN7563 must use normal SPI or gain a validated mux function |
-| SLIC GPIO/IRQ | Generic infrastructure implemented | Describe reset/INT per board; confirm polarity and debounce |
-| PCM/ZSI/ISI/SFC resets | IDs and provider implemented | Consume through the reset framework |
-| SLIC clock | Exposed on the ARM-family clock provider | Assign the correct consumer; do not confuse it with PCM BCLK |
-| PCM/DMA engine | Missing | Implement a platform/ASoC driver or a `pcm_func`-compatible layer |
-| PCM binding | Missing | Create a schema for each hardware variant |
-| PCM DT nodes | Missing | Add MMIO, IRQ, reset, clock, and pinctrl resources |
-| SLIC/FXS driver | Missing from the current tree | Add Microsemi/Silicon/Lantiq backends and line integration |
-| Legacy `pcm_func` ABI | Present only in old modules | Optionally preserve as a compatibility boundary |
+| Component              | Current kernel                                              | Porting requirement                                               |
+| ---------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------- |
+| PCM1/PCM2 pinctrl      | Implemented for all six targets                             | Select board-specific groups and validate conflicts               |
+| PCM-SPI pinctrl        | Implemented on EN751221, EN7528, EN7523, EN7581, and AN7583 | AN7563 must use normal SPI or gain a validated mux function       |
+| SLIC GPIO/IRQ          | Generic infrastructure implemented                          | Describe reset/INT per board; confirm polarity and debounce       |
+| PCM/ZSI/ISI/SFC resets | IDs and provider implemented                                | Consume through the reset framework                               |
+| SLIC clock             | Exposed on the ARM-family clock provider                    | Assign the correct consumer; do not confuse it with PCM BCLK      |
+| PCM/DMA engine         | Missing                                                     | Implement a platform/ASoC driver or a `pcm_func`-compatible layer |
+| PCM binding            | Missing                                                     | Create a schema for each hardware variant                         |
+| PCM DT nodes           | Missing                                                     | Add MMIO, IRQ, reset, clock, and pinctrl resources                |
+| SLIC/FXS driver        | Missing from the current tree                               | Add Microsemi/Silicon/Lantiq backends and line integration        |
+| Legacy `pcm_func` ABI  | Present only in old modules                                 | Optionally preserve as a compatibility boundary                   |
 
 ## 5. Common pinctrl architecture
 
@@ -86,21 +86,21 @@ The GPIO block is a `syscon/simple-mfd` at `0x1fbf0200`, spanning `0xc0` bytes. 
 
 ### 5.1 Common GPIO registers
 
-| Offset | Name | Role |
-|---:|---|---|
-| `0x00` | `GPIO_CTRL` | direction, two bits per line |
-| `0x04` | `GPIO_DATA` | low-bank data |
-| `0x08` | `GPIO_INT` | low IRQ status, W1C |
-| `0x0c` | `GPIO_INT_EDGE` | edge type |
-| `0x10` | `GPIO_INT_LEVEL` | level type |
-| `0x14` | `GPIO_OE` | low-bank output enable |
-| `0x20` | `GPIO_CTRL1` | additional direction fields |
-| `0x60`/`0x64` | `GPIO_CTRL2/3` | additional direction fields |
-| `0x70` | `GPIO_DATA1` | high-bank data |
-| `0x78` | `GPIO_OE1` | high-bank output enable |
-| `0x7c` | `GPIO_INT1` | high IRQ status, W1C |
-| `0x80`–`0x88` | `GPIO_INT_EDGE1/2/3` | additional edge fields |
-| `0x8c`–`0x94` | `GPIO_INT_LEVEL1/2/3` | additional level fields |
+|        Offset | Name                  | Role                         |
+| ------------: | --------------------- | ---------------------------- |
+|        `0x00` | `GPIO_CTRL`           | direction, two bits per line |
+|        `0x04` | `GPIO_DATA`           | low-bank data                |
+|        `0x08` | `GPIO_INT`            | low IRQ status, W1C          |
+|        `0x0c` | `GPIO_INT_EDGE`       | edge type                    |
+|        `0x10` | `GPIO_INT_LEVEL`      | level type                   |
+|        `0x14` | `GPIO_OE`             | low-bank output enable       |
+|        `0x20` | `GPIO_CTRL1`          | additional direction fields  |
+| `0x60`/`0x64` | `GPIO_CTRL2/3`        | additional direction fields  |
+|        `0x70` | `GPIO_DATA1`          | high-bank data               |
+|        `0x78` | `GPIO_OE1`            | high-bank output enable      |
+|        `0x7c` | `GPIO_INT1`           | high IRQ status, W1C         |
+| `0x80`–`0x88` | `GPIO_INT_EDGE1/2/3`  | additional edge fields       |
+| `0x8c`–`0x94` | `GPIO_INT_LEVEL1/2/3` | additional level fields      |
 
 The core assumes at most 64 GPIOs, 32-line data banks, and 16-line direction/IRQ register groups. It supports active-low/high level interrupts, rising/falling edges, and both edges.
 
@@ -114,14 +114,14 @@ The core assumes at most 64 GPIOs, 32-line data banks, and 16-line direction/IRQ
 
 ### 5.3 GPIO and IRQ counts
 
-| SoC | Effective `ngpio` | Effective IRQs | Evidence/risk |
-|---|---:|---:|---|
-| EN751221 | 64 | 16 | DTS exposes GPIO0..28; advertising 64 lines needs justification |
-| EN7528 | 42 | 16 | Explicit and consistent with `gpio-ranges` |
-| EN7523 | 64 (default) | 64 (default) | DTS maps 28 GPIOs; default exposes lines without a useful range |
-| AN7563 | 64 (default) | 64 (default) | GPIO/function groups cover a smaller package; validate hardware count |
-| EN7581 | 64 (default) | 64 (default) | DTS maps 47 GPIOs |
-| AN7583 | 64 (default) | 64 (default) | GPIO0..52 groups exist; no platform DTS is present |
+| SoC      | Effective `ngpio` | Effective IRQs | Evidence/risk                                                         |
+| -------- | ----------------: | -------------: | --------------------------------------------------------------------- |
+| EN751221 |                64 |             16 | DTS exposes GPIO0..28; advertising 64 lines needs justification       |
+| EN7528   |                42 |             16 | Explicit and consistent with `gpio-ranges`                            |
+| EN7523   |      64 (default) |   64 (default) | DTS maps 28 GPIOs; default exposes lines without a useful range       |
+| AN7563   |      64 (default) |   64 (default) | GPIO/function groups cover a smaller package; validate hardware count |
+| EN7581   |      64 (default) |   64 (default) | DTS maps 47 GPIOs                                                     |
+| AN7583   |      64 (default) |   64 (default) | GPIO0..52 groups exist; no platform DTS is present                    |
 
 Recommendation: set `num_gpio` and `num_irq` explicitly in every `match_data`, aligned with the documented block and package. `gpio-ranges` constrains pinctrl translation but does not by itself fix the line count advertised by gpiochip.
 
@@ -134,12 +134,12 @@ For PCM/SPI, drive strength must be selected from board loading and signal integ
 
 ## 6. Device Tree instances
 
-| SoC | Chip SCU | GPIO/pinctrl | Compatible | IRQ | `gpio-ranges` |
-|---|---|---|---|---|---|
-| EN751221 | `0x1fa20000/0x400` | `0x1fbf0200/0xc0` | `econet,en751221-pinctrl` | intc 10 | `<0 13 29>` |
-| EN7528 | `0x1fa20000/0x400` | `0x1fbf0200/0xc0` | `econet,en7528-pinctrl` | GIC shared 10 | `<0 0 42>` |
-| EN7523 | `0x1fa20000/0x400` | `0x1fbf0200/0xc0` | `airoha,en7523-pinctrl` | GIC SPI 26 | `<0 12 28>` |
-| EN7581 | `0x1fa20000/0x388` | `0x1fbf0200/0xc0` | **DTS: `airoha,an7581-pinctrl`** | GIC SPI 26 | `<0 13 47>` |
+| SoC      | Chip SCU           | GPIO/pinctrl      | Compatible                       | IRQ           | `gpio-ranges` |
+| -------- | ------------------ | ----------------- | -------------------------------- | ------------- | ------------- |
+| EN751221 | `0x1fa20000/0x400` | `0x1fbf0200/0xc0` | `econet,en751221-pinctrl`        | intc 10       | `<0 13 29>`   |
+| EN7528   | `0x1fa20000/0x400` | `0x1fbf0200/0xc0` | `econet,en7528-pinctrl`          | GIC shared 10 | `<0 0 42>`    |
+| EN7523   | `0x1fa20000/0x400` | `0x1fbf0200/0xc0` | `airoha,en7523-pinctrl`          | GIC SPI 26    | `<0 12 28>`   |
+| EN7581   | `0x1fa20000/0x388` | `0x1fbf0200/0xc0` | **DTS: `airoha,an7581-pinctrl`** | GIC SPI 26    | `<0 13 47>`   |
 
 The correct EN7581 compatible, according to both driver and binding, is `airoha,en7581-pinctrl`.
 
@@ -149,14 +149,14 @@ AN7563 and AN7583 have pinctrl drivers and bindings but no corresponding SoC DTS
 
 Numbers below are pinctrl pin numbers; logical GPIO numbers appear in parentheses.
 
-| SoC | PCM1 | PCM2 | SLIC control bus | INT/reset/CS |
-|---|---|---|---|---|
-| EN751221 | 25–28 (GPIO12–15) | 17–20 (GPIO4–7) | PCM-SPI 17–20 | INT 16/GPIO3; reset 15/GPIO2; CS3 16/GPIO3; CS4 22/GPIO9 |
-| EN7528 | 12–15 (GPIO12–15) | 24–27 (GPIO24–27) | PCM-SPI 4–7 (GPIO4–7) | INT GPIO1; reset GPIO2; CS1 GPIO3; CS2 GPIO10; CS3 GPIO23; CS4 GPIO21; CS5 GPIO9; CS6 GPIO28; CS7 GPIO29 |
-| EN7523 | 24–27 (GPIO12–15) | 16–19 (GPIO4–7) | PCM-SPI GPIO4–7 + GPIO12–15 | INT GPIO3; reset GPIO2; CS1 GPIO10; CS2 GPIO27; CS3 GPIO8; CS4 GPIO11 |
-| EN7581 | 22–25 (GPIO9–12) | 18–21 (GPIO5–8) | PCM-SPI GPIO5–12 | INT GPIO1; reset GPIO2; CS1 GPIO30; CS2 GPIO27; CS3 GPIO28; CS4 GPIO29 |
-| AN7563 | GPIO22–25 | GPIO1–4 | no `pcm_spi` function; primary SPI on pins 32–35 | SPI quad GPIO2/3; CS1 GPIO4 |
-| AN7583 | 10–14 (GPIO8–12) | 28–31 + 24 (GPIO26–29 + GPIO22) | PCM-SPI 28–31 + 10–13 | reset 14/GPIO12; CS1 24/GPIO22 |
+| SoC      | PCM1              | PCM2                            | SLIC control bus                                 | INT/reset/CS                                                                                             |
+| -------- | ----------------- | ------------------------------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| EN751221 | 25–28 (GPIO12–15) | 17–20 (GPIO4–7)                 | PCM-SPI 17–20                                    | INT 16/GPIO3; reset 15/GPIO2; CS3 16/GPIO3; CS4 22/GPIO9                                                 |
+| EN7528   | 12–15 (GPIO12–15) | 24–27 (GPIO24–27)               | PCM-SPI 4–7 (GPIO4–7)                            | INT GPIO1; reset GPIO2; CS1 GPIO3; CS2 GPIO10; CS3 GPIO23; CS4 GPIO21; CS5 GPIO9; CS6 GPIO28; CS7 GPIO29 |
+| EN7523   | 24–27 (GPIO12–15) | 16–19 (GPIO4–7)                 | PCM-SPI GPIO4–7 + GPIO12–15                      | INT GPIO3; reset GPIO2; CS1 GPIO10; CS2 GPIO27; CS3 GPIO8; CS4 GPIO11                                    |
+| EN7581   | 22–25 (GPIO9–12)  | 18–21 (GPIO5–8)                 | PCM-SPI GPIO5–12                                 | INT GPIO1; reset GPIO2; CS1 GPIO30; CS2 GPIO27; CS3 GPIO28; CS4 GPIO29                                   |
+| AN7563   | GPIO22–25         | GPIO1–4                         | no `pcm_spi` function; primary SPI on pins 32–35 | SPI quad GPIO2/3; CS1 GPIO4                                                                              |
+| AN7583   | 10–14 (GPIO8–12)  | 28–31 + 24 (GPIO26–29 + GPIO22) | PCM-SPI 28–31 + 10–13                            | reset 14/GPIO12; CS1 24/GPIO22                                                                           |
 
 ### 7.1 Relevant conflicts
 
@@ -172,16 +172,16 @@ Numbers below are pinctrl pin numbers; logical GPIO numbers appear in parenthese
 
 **Chip SCU `+0x104`**, physical `0x1fa20104`, legacy MIPS logical `0xbfa20104`:
 
-| Bit | Current function |
-|---:|---|
-| 8 | PCM-SPI CS3 |
-| 9 | PCM-SPI CS4 |
-| 10 | PCM-SPI reset |
-| 11 | PCM-SPI interrupt |
-| 12 | SPI2/PCM-SPI base |
-| 13 | PCM1 |
-| 14 | PCM2 |
-| 19 | SPI quad |
+| Bit | Current function  |
+| --: | ----------------- |
+|   8 | PCM-SPI CS3       |
+|   9 | PCM-SPI CS4       |
+|  10 | PCM-SPI reset     |
+|  11 | PCM-SPI interrupt |
+|  12 | SPI2/PCM-SPI base |
+|  13 | PCM1              |
+|  14 | PCM2              |
+|  19 | SPI quad          |
 
 Correlation with the old `chipScuReg` table:
 
@@ -195,16 +195,16 @@ Correlation with the old `chipScuReg` table:
 
 **Chip SCU `+0x15c`**, physical `0x1fa2015c`, legacy logical `0xbfa2015c`:
 
-| Bit | Current function |
-|---:|---|
-| 14 | PCM-SPI CS1 |
-| 15 | normal SPI CS1 |
-| 16 | PCM-SPI reset |
-| 17 | PCM-SPI interrupt |
-| 18 | PCM-SPI |
-| 19 | PCM1 |
-| 20 | PCM2 |
-| 27 | SPI quad |
+| Bit | Current function  |
+| --: | ----------------- |
+|  14 | PCM-SPI CS1       |
+|  15 | normal SPI CS1    |
+|  16 | PCM-SPI reset     |
+|  17 | PCM-SPI interrupt |
+|  18 | PCM-SPI           |
+|  19 | PCM1              |
+|  20 | PCM2              |
+|  27 | SPI quad          |
 
 CS2–CS7 live at **Chip SCU `+0x224`**, bits 10–15. Driver comments warn that some vendor bit names are displaced by two positions relative to the datasheet signal. Use the driver's group names rather than raw vendor labels.
 
@@ -212,19 +212,19 @@ CS2–CS7 live at **Chip SCU `+0x224`**, bits 10–15. Driver comments warn that
 
 **Chip SCU `+0x214`**, physical `0x1fa20214`, legacy logical `0xbfa20214`:
 
-| Bit | Current function |
-|---:|---|
-| 0 | normal SPI CS1 |
-| 4 | SPI quad |
-| 8 | PCM-SPI reset |
-| 9 | PCM-SPI interrupt |
-| 12 | PCM1 |
-| 13 | PCM2 |
-| 16 | PCM-SPI |
-| 17 | PCM-SPI CS1 |
+|   Bit | Current function                    |
+| ----: | ----------------------------------- |
+|     0 | normal SPI CS1                      |
+|     4 | SPI quad                            |
+|     8 | PCM-SPI reset                       |
+|     9 | PCM-SPI interrupt                   |
+|    12 | PCM1                                |
+|    13 | PCM2                                |
+|    16 | PCM-SPI                             |
+|    17 | PCM-SPI CS1                         |
 | 18/19 | PCM-SPI CS2, P128/P156 alternatives |
-| 20 | PCM-SPI CS3 |
-| 21 | PCM-SPI CS4 |
+|    20 | PCM-SPI CS3                         |
+|    21 | PCM-SPI CS4                         |
 
 This directly confirms the HIR 0x0c entry recovered from the legacy modules.
 
@@ -242,14 +242,14 @@ Do not reuse EN7523 offsets on EN7581/AN7583 merely because the group names are 
 
 The NP SCU uses `RST_CTRL2 = 0x830` and `RST_CTRL1 = 0x834`. In old MIPS code, `0xbfb00834` was the KSEG1 logical address of `RST_CTRL1`.
 
-| `RST_CTRL1` bit | EN7523/EN7581/AN7583 | EN751221/EN7528 | Voice relationship |
-|---:|---|---|---|
-| 0 | `PCM1_ZSI_ISI_RST` | `PCM1_ZSI_ISI_RST` | PCM1 serial wrapper |
-| 4 | `PCM_SPIWP_RST` | `PCM2_RST` | PCM-SPI wrapper on ARM; PCM2 on MIPS |
-| 11 | `PCM1_RST` | `PCM1_RST` | PCM1 engine |
-| 17 | `PCM2_ZSI_ISI_RST` | `PCM2_ZSI_ISI_RST` | PCM2 serial wrapper |
-| 18 | `SFC_RST` | `SFC_RST` | serial controller used by legacy manual access |
-| 25 | `SFC2_PCM_RST` | `SFC2_PCM_RST` | shared SFC2/PCM block |
+| `RST_CTRL1` bit | EN7523/EN7581/AN7583 | EN751221/EN7528    | Voice relationship                             |
+| --------------: | -------------------- | ------------------ | ---------------------------------------------- |
+|               0 | `PCM1_ZSI_ISI_RST`   | `PCM1_ZSI_ISI_RST` | PCM1 serial wrapper                            |
+|               4 | `PCM_SPIWP_RST`      | `PCM2_RST`         | PCM-SPI wrapper on ARM; PCM2 on MIPS           |
+|              11 | `PCM1_RST`           | `PCM1_RST`         | PCM1 engine                                    |
+|              17 | `PCM2_ZSI_ISI_RST`   | `PCM2_ZSI_ISI_RST` | PCM2 serial wrapper                            |
+|              18 | `SFC_RST`            | `SFC_RST`          | serial controller used by legacy manual access |
+|              25 | `SFC2_PCM_RST`       | `SFC2_PCM_RST`     | shared SFC2/PCM block                          |
 
 The driver applies approximately 5–6 ms pulses to bits 0, 4, and 17; most other resets use 10–50 µs. Replaying a legacy sequence with arbitrary `udelay()` calls can violate this distinction.
 
@@ -283,10 +283,10 @@ On EN7523 the SLIC selector is bit 0 of `0x1c8`; AN7583 uses bit 1. Clock descri
 
 The primary SPI clock is exposed through Chip SCU `+0x0cc`:
 
-| SoC | Base | Default divisor |
-|---|---:|---:|
-| EN751221 | 500 MHz; 400 MHz on EN7526C | 40 |
-| EN7528 | 400 MHz | 10 |
+| SoC      |                        Base | Default divisor |
+| -------- | --------------------------: | --------------: |
+| EN751221 | 500 MHz; 400 MHz on EN7526C |              40 |
+| EN7528   |                     400 MHz |              10 |
 
 This is not the same domain as the `0x11c/0x120` offsets observed in legacy PCM/SLIC programming. The domains need separate names and validation.
 
@@ -301,34 +301,34 @@ No CCF clock is explicitly identified as the PCM bit/frame clock. Before creatin
 
 ## 11. Comparison with the previously documented data path
 
-| Previous report item | Confirmation/change in the current kernel |
-|---|---|
-| PCM physical base `0x1fbd0000` | Still the strongest hypothesis, but current DTS has no node or driver |
-| EN7523 IRQ GIC SPI 27 | No current consumer; validate against the interrupt map before merging |
-| Chip SCU `0x104/0x15c/0x214` | Confirmed by pinctrl drivers |
-| NP SCU `0x834` | Confirmed and translated to reset IDs |
+| Previous report item                  | Confirmation/change in the current kernel                                        |
+| ------------------------------------- | -------------------------------------------------------------------------------- |
+| PCM physical base `0x1fbd0000`        | Still the strongest hypothesis, but current DTS has no node or driver            |
+| EN7523 IRQ GIC SPI 27                 | No current consumer; validate against the interrupt map before merging           |
+| Chip SCU `0x104/0x15c/0x214`          | Confirmed by pinctrl drivers                                                     |
+| NP SCU `0x834`                        | Confirmed and translated to reset IDs                                            |
 | Interfaces 0=SPI, 1=ZSI, 2=ISI, 3=CSI | Still legacy-module evidence; pinctrl exposes PCM/PCM-SPI, not the full ABI enum |
-| Manual SFC at `0x1fbd4000` | SFC/SFC2-PCM resets confirmed; functional driver still missing |
-| EN751221/EN7528 `0x24` descriptor | No current implementation; must be implemented in the MIPS variant |
-| EN7523 `0x0c` descriptor | No current implementation; do not reuse the MIPS ring |
-| Stable `pcm_func` ABI | Can remain a compatibility boundary above the new driver |
+| Manual SFC at `0x1fbd4000`            | SFC/SFC2-PCM resets confirmed; functional driver still missing                   |
+| EN751221/EN7528 `0x24` descriptor     | No current implementation; must be implemented in the MIPS variant               |
+| EN7523 `0x0c` descriptor              | No current implementation; do not reuse the MIPS ring                            |
+| Stable `pcm_func` ABI                 | Can remain a compatibility boundary above the new driver                         |
 
 ### 11.1 PCM engine registers that remain useful reverse-engineering input
 
-| Offset | Reconstructed function |
-|---:|---|
-| `0x00` | PCM control |
-| `0x04`–`0x10` | TX slots 0–7 |
-| `0x14`–`0x20` | RX slots 0–7 |
-| `0x24` | interrupt status, observed mask `0x7ff`, W1C |
-| `0x28` | interrupt mask |
-| `0x2c`/`0x30` | TX/RX polling |
-| `0x34`/`0x38` | TX/RX ring bases |
-| `0x3c` | ring size/configuration |
-| `0x40` | DMA control |
-| `0x48`–`0xa4` | additional EN7523 slots |
-| `0xa8` | unnamed EN7523 register, observed value `0xa0` |
-| `0xac` | EN7523 channel enable, mask `0xf` |
+|        Offset | Reconstructed function                         |
+| ------------: | ---------------------------------------------- |
+|        `0x00` | PCM control                                    |
+| `0x04`–`0x10` | TX slots 0–7                                   |
+| `0x14`–`0x20` | RX slots 0–7                                   |
+|        `0x24` | interrupt status, observed mask `0x7ff`, W1C   |
+|        `0x28` | interrupt mask                                 |
+| `0x2c`/`0x30` | TX/RX polling                                  |
+| `0x34`/`0x38` | TX/RX ring bases                               |
+|        `0x3c` | ring size/configuration                        |
+|        `0x40` | DMA control                                    |
+| `0x48`–`0xa4` | additional EN7523 slots                        |
+|        `0xa8` | unnamed EN7523 register, observed value `0xa0` |
+|        `0xac` | EN7523 channel enable, mask `0xf`              |
 
 These should become per-variant register definitions or `regmap_field`s with documented masks and tests, not a literal copy of decompiled code.
 

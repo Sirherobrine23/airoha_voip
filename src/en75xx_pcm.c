@@ -8,6 +8,7 @@
  * described by match data instead of being spread through the data path.
  */
 #include <linux/bitfield.h>
+#include <linux/build_bug.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
@@ -20,23 +21,14 @@
 #include <linux/of_device.h>
 #include <linux/poll.h>
 #include <linux/platform_device.h>
+#include <linux/reset.h>
 #include <linux/slab.h>
+#include <linux/unaligned.h>
 #include <linux/workqueue.h>
 
 #include "../include/en75xx_voice.h"
 #include "en75xx_pcm_regs.h"
 #include "en75xx_g711.h"
-#include "en75xx_scu.h"
-
-#define EN75XX_SCU_CHIP_ID		0x064
-#define EN75XX_SCU_PCM_RESET		0x834
-#define EN75XX_SCU_PCM0_RESET		BIT(11)
-
-#define EN75XX_CHIP_SCU_PCM_CLK_DIV	0x0d4
-#define EN75XX_CHIP_SCU_PCM_CLK_OUT	0x0d8
-#define EN75XX_CHIP_SCU_IOMUX1		0x104
-#define EN75XX_CHIP_SCU_PCM_CLK_SRC	0x148
-#define EN75XX_IOMUX_ZSI_ISI		BIT(13)
 
 struct en75xx_pcm_soc_data {
 	const char *name;
@@ -45,6 +37,7 @@ struct en75xx_pcm_soc_data {
 	u32 ring_cfg;
 	u32 dma_mask;
 	u32 dma_or;
+	u8 channel_mask;
 	bool pcm_v2;		/* EN7523: 12-byte descriptor, CHAN_ENABLE */
 };
 
@@ -73,8 +66,7 @@ struct en75xx_pcm_dev {
 	struct device *dev;
 	const struct en75xx_pcm_soc_data *soc;
 	void __iomem *base;
-	struct en75xx_scu sys;		/* NP SCU:   reset          */
-	struct en75xx_scu chip;		/* chip SCU: pinmux, clock   */
+	struct reset_control *rst;
 	int irq;
 	struct mutex lock;
 	struct delayed_work poll_work;
@@ -90,12 +82,10 @@ struct en75xx_pcm_dev {
 	u32 tx_slots[4];
 	u32 rx_slots[4];
 	u32 iface_ctrl;
-	u32 reset_mask;
+	u8 dma_channel_mask;
 	u8 active_mask;
 	bool running;
 	bool big_endian_samples;
-	bool configure_pins;
-	bool pinctrl_managed;
 	u64 dma_errors;
 };
 
@@ -119,7 +109,21 @@ static inline void pcm_write(struct en75xx_pcm_dev *pcm, u32 reg, u32 val)
 
 static u32 en75xx_pcm_dma_addr(struct en75xx_pcm_dev *pcm, dma_addr_t addr)
 {
-	return ((u32)addr & pcm->soc->dma_mask) | pcm->soc->dma_or;
+	WARN_ON_ONCE((u64)addr & ~(u64)pcm->soc->dma_mask);
+	return (lower_32_bits(addr) & pcm->soc->dma_mask) | pcm->soc->dma_or;
+}
+
+static bool en75xx_pcm_dma_range_valid(struct en75xx_pcm_dev *pcm,
+				       dma_addr_t addr, size_t size)
+{
+	u64 first = addr;
+	u64 last;
+
+	if (!size)
+		return false;
+	last = first + size - 1;
+	return last >= first && !(first & ~(u64)pcm->soc->dma_mask) &&
+		!(last & ~(u64)pcm->soc->dma_mask);
 }
 
 static void en75xx_pcm_hw_stop(struct en75xx_pcm_dev *pcm)
@@ -132,48 +136,12 @@ static void en75xx_pcm_hw_stop(struct en75xx_pcm_dev *pcm)
 	pcm_write(pcm, EN75XX_PCM_ISR, pcm_read(pcm, EN75XX_PCM_ISR));
 }
 
-static void en75xx_pcm_soft_reset(struct en75xx_pcm_dev *pcm)
+static int en75xx_pcm_soft_reset(struct en75xx_pcm_dev *pcm)
 {
-	u32 val;
+	if (!pcm->rst)
+		return 0;
 
-	if (!en75xx_scu_valid(&pcm->sys))
-		return;
-
-	val = en75xx_scu_read(&pcm->sys, EN75XX_SCU_PCM_RESET);
-	en75xx_scu_write(&pcm->sys, EN75XX_SCU_PCM_RESET,
-			 val & ~pcm->reset_mask);
-	usleep_range(5000, 6000);
-	en75xx_scu_write(&pcm->sys, EN75XX_SCU_PCM_RESET,
-			 val | pcm->reset_mask);
-	usleep_range(5000, 6000);
-	en75xx_scu_write(&pcm->sys, EN75XX_SCU_PCM_RESET,
-			 val & ~pcm->reset_mask);
-	usleep_range(5000, 6000);
-}
-
-static void en75xx_pcm_clock_setup(struct en75xx_pcm_dev *pcm)
-{
-	u32 val;
-
-	/*
-	 * Skip the pinmux entirely when the device tree hands us a
-	 * pinctrl state: on an upstream tree the "pcm" function is
-	 * applied by the pinctrl core before probe, and writing IOMUX1
-	 * here would fight it.
-	 */
-	if (!en75xx_scu_valid(&pcm->chip) || !pcm->configure_pins ||
-	    pcm->pinctrl_managed)
-		return;
-
-	val = en75xx_scu_read(&pcm->chip, EN75XX_CHIP_SCU_IOMUX1);
-	en75xx_scu_write(&pcm->chip, EN75XX_CHIP_SCU_IOMUX1,
-			 val | EN75XX_IOMUX_ZSI_ISI);
-
-	/* Vendor voice firmware uses the ZSI/PCM clock source and master output. */
-	val = en75xx_scu_read(&pcm->chip, EN75XX_CHIP_SCU_PCM_CLK_SRC);
-	en75xx_scu_write(&pcm->chip, EN75XX_CHIP_SCU_PCM_CLK_SRC, val | 0x1c);
-	en75xx_scu_write(&pcm->chip, EN75XX_CHIP_SCU_PCM_CLK_DIV, 0x00000008);
-	en75xx_scu_write(&pcm->chip, EN75XX_CHIP_SCU_PCM_CLK_OUT, 0x00a00301);
+	return reset_control_reset(pcm->rst);
 }
 
 /*
@@ -198,7 +166,6 @@ static void en75xx_pcm_desc_prepare(struct en75xx_pcm_dev *pcm, void *ring,
 				    u8 mask)
 {
 	u32 status = EN75XX_PCM_DESC_OWN |
-		FIELD_PREP(EN75XX_PCM_DESC_CH_VALID, mask) |
 		FIELD_PREP(EN75XX_PCM_DESC_SAMPLE_SIZE,
 			   EN75XX_PCM_FRAME_SAMPLES);
 
@@ -213,6 +180,8 @@ static void en75xx_pcm_desc_prepare(struct en75xx_pcm_dev *pcm, void *ring,
 		struct en75xx_pcm_desc_v1 *d = en75xx_pcm_desc(pcm, ring, index);
 		unsigned int channel;
 
+		status |= FIELD_PREP(EN75XX_PCM_DESC_CH_VALID, mask);
+
 		for (channel = 0; channel < EN75XX_PCM_MAX_CHANNELS; channel++)
 			d->buf_addr[channel] = en75xx_pcm_dma_addr(pcm,
 				frame_dma + channel * EN75XX_PCM_FRAME_BYTES);
@@ -224,17 +193,16 @@ static void en75xx_pcm_desc_prepare(struct en75xx_pcm_dev *pcm, void *ring,
 
 static void en75xx_pcm_compand_tx(struct en75xx_pcm_chan *ch, u8 *dst)
 {
-	s16 linear[EN75XX_PCM_FRAME_SAMPLES];
 	unsigned int i;
 
 	if (ch->codec == EN75XX_PCM_CODEC_LINEAR16)
 		return;
 
-	memcpy(linear, dst, sizeof(linear));
 	for (i = 0; i < EN75XX_PCM_FRAME_SAMPLES; i++) {
+		s16 linear = get_unaligned_le16(dst + i * 2);
 		u8 code = (ch->codec == EN75XX_PCM_CODEC_ULAW) ?
-			en75xx_ulaw_encode(linear[i]) :
-			en75xx_alaw_encode(linear[i]);
+			en75xx_ulaw_encode(linear) :
+			en75xx_alaw_encode(linear);
 		u16 slot = ch->tx_msb ? ((u16)code << 8) : code;
 
 		dst[i * 2] = slot & 0xff;
@@ -258,7 +226,14 @@ static void en75xx_pcm_fill_tx_channel(struct en75xx_pcm_dev *pcm,
 		ch->tx_underruns++;
 	}
 	ch->tx_bytes += copied;
-	en75xx_pcm_compand_tx(ch, dst);
+	if (ch->codec != EN75XX_PCM_CODEC_LINEAR16) {
+		en75xx_pcm_compand_tx(ch, dst);
+	} else if (pcm->big_endian_samples) {
+		unsigned int i;
+
+		for (i = 0; i < EN75XX_PCM_FRAME_BYTES; i += 2)
+			swap(dst[i], dst[i + 1]);
+	}
 	wake_up_interruptible(&ch->tx_wait);
 }
 
@@ -273,16 +248,17 @@ static void en75xx_pcm_push_rx_channel(struct en75xx_pcm_dev *pcm,
 	unsigned int i;
 
 	if (ch->codec != EN75XX_PCM_CODEC_LINEAR16) {
-		s16 *out = (s16 *)tmp;
-
 		/*
 		 * Capture always carries the G.711 code in the low byte
 		 * of the slot, regardless of which byte playback uses.
 		 */
-		for (i = 0; i < EN75XX_PCM_FRAME_SAMPLES; i++)
-			out[i] = (ch->codec == EN75XX_PCM_CODEC_ULAW) ?
+		for (i = 0; i < EN75XX_PCM_FRAME_SAMPLES; i++) {
+			s16 linear = (ch->codec == EN75XX_PCM_CODEC_ULAW) ?
 				en75xx_ulaw_decode(src[i * 2]) :
 				en75xx_alaw_decode(src[i * 2]);
+
+			put_unaligned_le16(linear, tmp + i * 2);
+		}
 		data = tmp;
 		goto queue;
 	}
@@ -300,7 +276,9 @@ queue:
 	if (kfifo_avail(&ch->rx_fifo) < EN75XX_PCM_FRAME_BYTES) {
 		u8 discard[EN75XX_PCM_FRAME_BYTES];
 
-		kfifo_out(&ch->rx_fifo, discard, EN75XX_PCM_FRAME_BYTES);
+		if (kfifo_out(&ch->rx_fifo, discard,
+			      EN75XX_PCM_FRAME_BYTES) != EN75XX_PCM_FRAME_BYTES)
+			kfifo_reset(&ch->rx_fifo);
 		ch->rx_overruns++;
 	}
 	copied = kfifo_in(&ch->rx_fifo, data, EN75XX_PCM_FRAME_BYTES);
@@ -325,7 +303,7 @@ static void en75xx_pcm_fill_tx_desc(struct en75xx_pcm_dev *pcm,
 			memset(dst, 0, EN75XX_PCM_FRAME_BYTES);
 	}
 	en75xx_pcm_desc_prepare(pcm, pcm->tx_ring, index, frame_dma,
-				pcm->active_mask);
+				pcm->dma_channel_mask);
 }
 
 static void en75xx_pcm_rearm_rx_desc(struct en75xx_pcm_dev *pcm,
@@ -334,7 +312,7 @@ static void en75xx_pcm_rearm_rx_desc(struct en75xx_pcm_dev *pcm,
 	dma_addr_t frame_dma = pcm->rx_buf_dma + index * EN75XX_PCM_FRAME_STRIDE;
 
 	en75xx_pcm_desc_prepare(pcm, pcm->rx_ring, index, frame_dma,
-				pcm->active_mask);
+				pcm->dma_channel_mask);
 }
 
 static void en75xx_pcm_process(struct en75xx_pcm_dev *pcm)
@@ -371,27 +349,36 @@ static void en75xx_pcm_process(struct en75xx_pcm_dev *pcm)
 	}
 }
 
-static void en75xx_pcm_hw_start(struct en75xx_pcm_dev *pcm)
+static int en75xx_pcm_hw_start(struct en75xx_pcm_dev *pcm)
 {
 	unsigned int index, i;
 	u32 dma_ctrl;
+	int ret;
 
 	en75xx_pcm_hw_stop(pcm);
-	en75xx_pcm_soft_reset(pcm);
-	en75xx_pcm_clock_setup(pcm);
+	ret = en75xx_pcm_soft_reset(pcm);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < 4; i++) {
 		pcm_write(pcm, EN75XX_PCM_TX_SLOT0 + i * 4, pcm->tx_slots[i]);
 		pcm_write(pcm, EN75XX_PCM_RX_SLOT0 + i * 4, pcm->rx_slots[i]);
 	}
-	pcm_write(pcm, EN75XX_PCM_IFACE_CTRL, pcm->iface_ctrl);
+	/* The vendor driver commits this register with a clear -> set edge. */
+	pcm_write(pcm, EN75XX_PCM_IFACE_CTRL,
+		  pcm->iface_ctrl & ~EN75XX_PCM_CTRL_CFG_VALID);
+	pcm_write(pcm, EN75XX_PCM_IFACE_CTRL,
+		  pcm->iface_ctrl | EN75XX_PCM_CTRL_CFG_VALID);
 	pcm_write(pcm, EN75XX_PCM_TX_DESC_BASE,
 		en75xx_pcm_dma_addr(pcm, pcm->tx_ring_dma));
 	pcm_write(pcm, EN75XX_PCM_RX_DESC_BASE,
 		en75xx_pcm_dma_addr(pcm, pcm->rx_ring_dma));
 	pcm_write(pcm, EN75XX_PCM_RING_CFG, pcm->soc->ring_cfg);
-	if (pcm->soc->pcm_v2)
+	if (pcm->soc->pcm_v2) {
 		pcm_write(pcm, EN7523_PCM_V2_CFG, 0xa0);
+		pcm_write(pcm, EN7523_PCM_CHAN_ENABLE,
+			  pcm->dma_channel_mask & pcm->soc->channel_mask);
+	}
 
 	for (index = 0; index < pcm->soc->ring_count; index++) {
 		en75xx_pcm_fill_tx_desc(pcm, index);
@@ -399,12 +386,13 @@ static void en75xx_pcm_hw_start(struct en75xx_pcm_dev *pcm)
 	}
 
 	pcm_write(pcm, EN75XX_PCM_ISR, pcm_read(pcm, EN75XX_PCM_ISR));
-	pcm_write(pcm, EN75XX_PCM_IMR, EN75XX_PCM_INT_ALL);
+	pcm_write(pcm, EN75XX_PCM_IMR,
+		  pcm->irq >= 0 ? EN75XX_PCM_INT_ALL : 0);
 
 	dma_ctrl = pcm_read(pcm, EN75XX_PCM_DMA_CTRL);
 	dma_ctrl &= ~(EN75XX_PCM_DMA_CH_MASK |
 		      EN75XX_PCM_DMA_TX_EN | EN75XX_PCM_DMA_RX_EN);
-	dma_ctrl |= FIELD_PREP(EN75XX_PCM_DMA_CH_MASK, pcm->active_mask);
+	dma_ctrl |= FIELD_PREP(EN75XX_PCM_DMA_CH_MASK, pcm->dma_channel_mask);
 	pcm_write(pcm, EN75XX_PCM_DMA_CTRL, dma_ctrl);
 	dma_wmb();
 	pcm_write(pcm, EN75XX_PCM_DMA_CTRL,
@@ -412,6 +400,7 @@ static void en75xx_pcm_hw_start(struct en75xx_pcm_dev *pcm)
 	pcm_write(pcm, EN75XX_PCM_RX_POLL, 1);
 	pcm_write(pcm, EN75XX_PCM_TX_POLL, 1);
 	pcm->running = true;
+	return 0;
 }
 
 static irqreturn_t en75xx_pcm_irq(int irq, void *data)
@@ -446,6 +435,14 @@ static void en75xx_pcm_poll_work(struct work_struct *work)
 
 	mutex_lock(&pcm->lock);
 	if (pcm->running) {
+		u32 status = pcm_read(pcm, EN75XX_PCM_ISR) &
+			     EN75XX_PCM_ISR_VALID;
+
+		if (status) {
+			pcm_write(pcm, EN75XX_PCM_ISR, status);
+			if (status & EN75XX_PCM_INT_ERR)
+				pcm->dma_errors++;
+		}
 		en75xx_pcm_process(pcm);
 		mod_delayed_work(system_highpri_wq, &pcm->poll_work,
 				 max_t(unsigned long, 1, msecs_to_jiffies(2)));
@@ -456,19 +453,24 @@ static void en75xx_pcm_poll_work(struct work_struct *work)
 static int en75xx_pcm_line_start(struct en75xx_pcm *pub, unsigned int channel)
 {
 	struct en75xx_pcm_dev *pcm = to_pcm_dev(pub);
+	int ret = 0;
 
-	if (channel >= EN75XX_PCM_MAX_CHANNELS)
+	if (channel >= EN75XX_PCM_MAX_CHANNELS ||
+	    !(pcm->dma_channel_mask & BIT(channel)))
 		return -EINVAL;
 
 	mutex_lock(&pcm->lock);
 	if (!(pcm->active_mask & BIT(channel))) {
 		pcm->active_mask |= BIT(channel);
-		en75xx_pcm_hw_start(pcm);
-		if (pcm->irq < 0)
+		if (!pcm->running)
+			ret = en75xx_pcm_hw_start(pcm);
+		if (ret)
+			pcm->active_mask &= ~BIT(channel);
+		else if (pcm->irq < 0)
 			mod_delayed_work(system_highpri_wq, &pcm->poll_work, 1);
 	}
 	mutex_unlock(&pcm->lock);
-	return 0;
+	return ret;
 }
 
 static void en75xx_pcm_line_stop(struct en75xx_pcm *pub, unsigned int channel)
@@ -483,8 +485,6 @@ static void en75xx_pcm_line_stop(struct en75xx_pcm *pub, unsigned int channel)
 	if (!pcm->active_mask) {
 		en75xx_pcm_hw_stop(pcm);
 		pcm->running = false;
-	} else {
-		en75xx_pcm_hw_start(pcm);
 	}
 	mutex_unlock(&pcm->lock);
 }
@@ -570,11 +570,14 @@ static void en75xx_pcm_line_get_stats(struct en75xx_pcm *pub,
 	if (channel >= EN75XX_PCM_MAX_CHANNELS)
 		return;
 	ch = &pcm->chan[channel];
+	/* All counter writers run from the PCM worker/IRQ under this lock. */
+	mutex_lock(&pcm->lock);
 	stats->rx_bytes = ch->rx_bytes;
 	stats->tx_bytes = ch->tx_bytes;
 	stats->rx_overruns = ch->rx_overruns;
 	stats->tx_underruns = ch->tx_underruns;
 	stats->dma_errors = pcm->dma_errors;
+	mutex_unlock(&pcm->lock);
 }
 
 static int en75xx_pcm_line_set_format(struct en75xx_pcm *pub,
@@ -702,7 +705,11 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 	struct en75xx_pcm_dev *pcm;
 	size_t ring_size, buf_size;
 	unsigned int channel;
+	u32 channel_mask;
 	int ret;
+
+	BUILD_BUG_ON(sizeof(struct en75xx_pcm_desc_v1) != 0x24);
+	BUILD_BUG_ON(sizeof(struct en75xx_pcm_desc_v2) != 0x0c);
 
 	pcm = devm_kzalloc(dev, sizeof(*pcm), GFP_KERNEL);
 	if (!pcm)
@@ -718,41 +725,36 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 	if (IS_ERR(pcm->base))
 		return PTR_ERR(pcm->base);
 
-	ret = en75xx_scu_get(pdev, &pcm->sys, "airoha,scu", "sys");
-	if (ret)
-		return ret;
-	ret = en75xx_scu_get(pdev, &pcm->chip, "airoha,chip-scu", "chip");
-	if (ret)
-		return ret;
-
-	/*
-	 * The pinctrl core applies the "default" state before probe when
-	 * the node declares one. Recording that here keeps the driver
-	 * from also poking IOMUX1 behind its back.
-	 */
-	pcm->pinctrl_managed = dev->of_node &&
-		of_property_present(dev->of_node, "pinctrl-0");
+	pcm->rst = devm_reset_control_get_optional_exclusive(dev, "pcm");
+	if (IS_ERR(pcm->rst))
+		return dev_err_probe(dev, PTR_ERR(pcm->rst),
+				     "cannot get PCM reset\n");
 
 	mutex_init(&pcm->lock);
 	INIT_LIST_HEAD(&pcm->node);
 	INIT_DELAYED_WORK(&pcm->poll_work, en75xx_pcm_poll_work);
 	pcm->iface_ctrl = EN75XX_PCM_CTRL_OEM;
-	pcm->reset_mask = EN75XX_SCU_PCM0_RESET;
+	pcm->dma_channel_mask = pcm->soc->channel_mask;
 	memcpy(pcm->tx_slots, default_slots, sizeof(default_slots));
 	memcpy(pcm->rx_slots, default_slots, sizeof(default_slots));
 	device_property_read_u32(dev, "airoha,pcm-interface-control",
 				 &pcm->iface_ctrl);
-	device_property_read_u32(dev, "airoha,pcm-reset-mask", &pcm->reset_mask);
+	channel_mask = pcm->dma_channel_mask;
+	device_property_read_u32(dev, "airoha,dma-channel-mask", &channel_mask);
+	if (!channel_mask || channel_mask & ~pcm->soc->channel_mask) {
+		dev_err(dev, "invalid DMA channel mask %#x (supported %#x)\n",
+			channel_mask, pcm->soc->channel_mask);
+		return -EINVAL;
+	}
+	pcm->dma_channel_mask = channel_mask;
 	device_property_read_u32_array(dev, "airoha,tx-slot-config",
 				       pcm->tx_slots, 4);
 	device_property_read_u32_array(dev, "airoha,rx-slot-config",
 				       pcm->rx_slots, 4);
 	pcm->big_endian_samples = device_property_read_bool(dev,
 						    "airoha,pcm-big-endian");
-	pcm->configure_pins = device_property_read_bool(dev,
-						"airoha,configure-pcm-pins");
 
-	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+	ret = dma_set_mask_and_coherent(dev, pcm->soc->dma_mask);
 	if (ret)
 		return ret;
 
@@ -771,6 +773,13 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 					   GFP_KERNEL);
 	if (!pcm->tx_buf || !pcm->rx_buf)
 		return -ENOMEM;
+	if (!en75xx_pcm_dma_range_valid(pcm, pcm->tx_ring_dma, ring_size) ||
+	    !en75xx_pcm_dma_range_valid(pcm, pcm->rx_ring_dma, ring_size) ||
+	    !en75xx_pcm_dma_range_valid(pcm, pcm->tx_buf_dma, buf_size) ||
+	    !en75xx_pcm_dma_range_valid(pcm, pcm->rx_buf_dma, buf_size)) {
+		dev_err(dev, "DMA allocation is outside the controller address window\n");
+		return -ERANGE;
+	}
 
 	for (channel = 0; channel < EN75XX_PCM_MAX_CHANNELS; channel++) {
 		struct en75xx_pcm_chan *ch = &pcm->chan[channel];
@@ -848,6 +857,7 @@ static const struct en75xx_pcm_soc_data en751221_pcm_data = {
 	 */
 	.ring_cfg = 0x9f,
 	.dma_mask = 0x1fffffff,
+	.channel_mask = GENMASK(7, 0),
 };
 
 static const struct en75xx_pcm_soc_data en7528_pcm_data = {
@@ -856,6 +866,7 @@ static const struct en75xx_pcm_soc_data en7528_pcm_data = {
 	.desc_size = sizeof(struct en75xx_pcm_desc_v1),
 	.ring_cfg = 0x9f,
 	.dma_mask = 0x1fffffff,
+	.channel_mask = GENMASK(7, 0),
 };
 
 static const struct en75xx_pcm_soc_data en7523_pcm_data = {
@@ -865,6 +876,7 @@ static const struct en75xx_pcm_soc_data en7523_pcm_data = {
 	.ring_cfg = 0x3f,
 	.dma_mask = 0x3fffffff,
 	.dma_or = 0x80000000,
+	.channel_mask = GENMASK(3, 0),
 	.pcm_v2 = true,
 };
 

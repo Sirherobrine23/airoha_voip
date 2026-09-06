@@ -5,8 +5,8 @@
  * Modelled on the TP-Link XX230v. The visible difference from the
  * EN7528 example is not the SLIC at all -- it is the PCM block:
  * gen2 descriptors and 32 timeslots, selected by the compatible in
- * en7523-voice.dtsi, and a PCM interrupt that actually maps (GIC_SPI 27,
- * per the vendor tree), so the driver runs interrupt-driven instead of
+ * en7523-voice.dtsi, and the confirmed PCM interrupt (GIC_SPI 27), so
+ * the driver runs interrupt-driven instead of
  * polled.
  */
 
@@ -30,6 +30,7 @@
 	 */
 	pinctrl-names = "default";
 	pinctrl-0 = <&pcm1_pins>;
+	airoha,dma-channel-mask = <0x05>;
 	status = "okay";
 };
 
@@ -47,7 +48,7 @@
 		airoha,pcm = <&pcm0>;
 		airoha,pcm-channel = <0>;
 
-		reset-gpios = <&gpio 20 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&pinctrl 20 GPIO_ACTIVE_LOW>;
 
 		status = "okay";
 	};

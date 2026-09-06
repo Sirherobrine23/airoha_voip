@@ -37,9 +37,8 @@
 	 * PCM bus. Note also that pcm_spi_int and pcm_spi_cs3 are both
 	 * gpio 16 -- pick one.
 	 *
-	 * This is the register the driver would otherwise poke itself
-	 * when given "airoha,configure-pcm-pins": with a pinctrl state
-	 * present it leaves 0x0104 alone.
+	 * These states are the only supported pinmux path in a modern tree;
+	 * the PCM driver does not write the shared SCU mux register.
 	 */
 
 	pcm1_pins: pcm1-pins {
@@ -73,30 +72,31 @@
 };
 
 / {
+	/*
+	 * The base EN751221 DTS still lacks this controller node. The current
+	 * unified Airoha SFC/SNFI driver uses one SFC range on this generation;
+	 * unlike EN7523 there is no NFI2SPI window.
+	 */
+	spi0: spi@1fa10000 {
+		compatible = "econet,en751221-spi";
+		reg = <0x1fa10000 0x140>;
+		clocks = <&scuclk EN751221_CLK_SPI>;
+		clock-names = "spi";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "disabled";
+	};
+
 	pcm0: pcm@1fbd0000 {
 		compatible = "econet,en751221-pcm";
 		reg = <0x1fbd0000 0x1000>;
 		reg-names = "pcm";
 
-		/*
-		 * hwirq 12 does not map cleanly on this SoC -- the INTC
-		 * reports it as a shadow interrupt -- so the driver falls
-		 * back to a polling worker. Re-enable once the INTC
-		 * binding handles it.
-		 *
-		 * interrupts = <12>;
-		 */
+		/* PCM1 input in the EN751221 interrupt controller. */
+		interrupts = <11>;
 
-		airoha,scu = <&scuclk>;
-		airoha,chip-scu = <&chip_scu>;
-
-		/*
-		 * The SCU binding has no PCM reset line: econet,en751221-scu.h
-		 * defines FE, GSW, GDMA and XPON resets only. So the block
-		 * is reset through the raw bit in NP SCU 0x834 rather than
-		 * through "resets = <&scuclk ...>".
-		 */
-		airoha,pcm-reset-mask = <0x800>;	/* SCU 0x834 bit 11 */
+		resets = <&scuclk EN751221_PCM1_RST>;
+		reset-names = "pcm";
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&pcm1_pins>;
@@ -113,6 +113,7 @@
 					 0x10701060 0x10901080>;
 		airoha,rx-slot-config = <0x10301020 0x10501040
 					 0x10701060 0x10901080>;
+		airoha,dma-channel-mask = <0xff>;
 
 		status = "disabled";
 	};
@@ -122,9 +123,10 @@
 		compatible = "econet,en751221-pcm";
 		reg = <0x1fbd2000 0x1000>;
 		reg-names = "pcm";
-		airoha,scu = <&scuclk>;
-		airoha,chip-scu = <&chip_scu>;
-		airoha,pcm-reset-mask = <0x1000>;	/* SCU 0x834 bit 12 */
+		/* PCM2 input; hwirq 33 is in the controller's second bank. */
+		interrupts = <33>;
+		resets = <&scuclk EN751221_PCM2_RST>;
+		reset-names = "pcm";
 		pinctrl-names = "default";
 		pinctrl-0 = <&pcm2_pins>;
 		airoha,pcm-interface-control = <0xf5071306>;
@@ -143,6 +145,15 @@
 
 		airoha,scu = <&scuclk>;
 		airoha,chip-scu = <&chip_scu>;
+		resets = <&scuclk EN751221_PCM1_ZSI_ISI_RST>;
+		reset-names = "zsi";
+
+		/*
+		 * Temporary compatibility path: the current MIPS clock provider
+		 * has no SLIC clock. These raw offsets are verified on EN751221
+		 * only and the driver rejects this property on other SoCs.
+		 */
+		airoha,legacy-scu-programming;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&pcm_spi_pins>;

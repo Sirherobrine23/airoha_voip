@@ -28,16 +28,21 @@ docs/                   what was reverse engineered, and how
 
 ## Status
 
+This is a reverse-engineered porting prototype, not a production-ready
+voice stack. The code now reflects the recovered register/descriptor
+layouts and the current kernel pinctrl/reset/clock providers, but it
+still needs per-board electrical and runtime validation.
+
 | Piece | State |
 |-------|-------|
-| PCM engine, both descriptor generations | implemented |
-| G.711 companding, `tx_msb` byte placement | implemented |
-| `/dev/en75xx-fxsN` character device | implemented |
-| ZSI transport | implemented |
-| Le9642: profiles, feed, ring cadence, hook, audio | implemented, follows a path proven on hardware |
-| Si3219x over SPI | implemented against the ProSLIC API, untested on hardware |
+| PCM gen1 (EN751221/EN7528) | implemented from vendor layout; bench validation required |
+| PCM gen2 (EN7523) | corrected to 12-byte descriptors and `CHAN_ENABLE`; hardware validation required |
+| G.711 and `/dev/en75xx-fxsN` | kernel-reference companding and endian paths corrected; integration test required |
+| ZSI transport | EN751221 legacy sequence retained explicitly; modern EN7523 resources wired, runtime validation required |
+| Le9642: profiles, feed, ring cadence, hook, audio | prototype based on recovered and observed behavior; not generally validated |
+| Si3219x over SPI | implemented against the ProSLIC API; untested on hardware |
 | MaxLinear PEF32001/PEF32002 (DUSLIC-XS) | not started; firmware blobs identified |
-| Asterisk channel driver | implemented, untested on hardware |
+| Asterisk channel driver | draft implementation; build/runtime testing against the target Asterisk version required |
 
 ## Two SLIC families, two transports
 
@@ -81,6 +86,11 @@ so the DTS ships with `interrupts` commented out.
 make -C /path/to/linux M=$PWD/src modules
 ```
 
+The kernel must be configured and prepared first (`make modules_prepare`).
+For OpenWrt, use `tools/install-openwrt.sh /path/to/openwrt`. It installs
+both package definitions and the kernel package's required `src`,
+`include`, `vendor` and `firmware` trees.
+
 or through OpenWrt, with `openwrt/package/kernel/en75xx-voip` copied
 into the tree and `kmod-en75xx-pcm` plus one `kmod-en75xx-slic-*`
 selected.
@@ -112,3 +122,5 @@ source files.
    trap that makes a second line go silent instead of failing.
 6. `docs/06-spi-shared-with-flash.md` — why the ProSLIC shares the boot
    flash's SPI controller, and what that costs during flash writes.
+7. `docs/correcoes-do-draft-pt-BR.md` / `docs/draft-corrections-en-US.md`
+   — what was corrected, what is confirmed, and what remains to prove.

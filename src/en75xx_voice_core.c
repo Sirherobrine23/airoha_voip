@@ -7,6 +7,7 @@
  */
 #include <linux/atomic.h>
 #include <linux/fs.h>
+#include <linux/idr.h>
 #include <linux/list.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -36,6 +37,8 @@ struct en75xx_voice_line {
 	enum en75xx_voice_linefeed linefeed;
 	u64 hook_changes;
 };
+
+static DEFINE_IDA(en75xx_voice_line_ida);
 
 struct en75xx_voice_file {
 	struct en75xx_voice_line *line;
@@ -261,7 +264,6 @@ static const struct file_operations en75xx_voice_fops = {
 	.write = en75xx_voice_write,
 	.unlocked_ioctl = en75xx_voice_ioctl,
 	.poll = en75xx_voice_poll,
-	.llseek = no_llseek,
 };
 
 struct en75xx_voice_line *
@@ -284,7 +286,14 @@ en75xx_voice_register_line(struct device *dev, struct en75xx_pcm *pcm,
 	line->dev = dev;
 	line->pcm = pcm;
 	line->pcm_channel = pcm_channel;
-	line->line = line_no;
+	/* Keep a requested board number when free, but never collide globally. */
+	ret = ida_alloc_range(&en75xx_voice_line_ida, line_no, line_no,
+			      GFP_KERNEL);
+	if (ret == -ENOSPC)
+		ret = ida_alloc(&en75xx_voice_line_ida, GFP_KERNEL);
+	if (ret < 0)
+		return ERR_PTR(ret);
+	line->line = ret;
 	line->slic_ops = slic_ops;
 	line->slic_priv = slic_priv;
 	line->linefeed = EN75XX_VOICE_LINEFEED_STANDBY;
@@ -294,25 +303,34 @@ en75xx_voice_register_line(struct device *dev, struct en75xx_pcm *pcm,
 	atomic_set(&line->event_seq, 0);
 
 	line->misc.minor = MISC_DYNAMIC_MINOR;
-	line->misc.name = devm_kasprintf(dev, GFP_KERNEL, "en75xx-fxs%u", line_no);
-	if (!line->misc.name)
-		return ERR_PTR(-ENOMEM);
+	line->misc.name = devm_kasprintf(dev, GFP_KERNEL, "en75xx-fxs%u",
+					 line->line);
+	if (!line->misc.name) {
+		ret = -ENOMEM;
+		goto err_ida;
+	}
 	line->misc.fops = &en75xx_voice_fops;
 	line->misc.parent = dev;
 	ret = misc_register(&line->misc);
 	if (ret)
-		return ERR_PTR(ret);
+		goto err_ida;
 
 	dev_info(dev, "registered %s as /dev/%s on PCM channel %u\n",
 		 slic_name, line->misc.name, pcm_channel);
 	return line;
+
+err_ida:
+	ida_free(&en75xx_voice_line_ida, line->line);
+	return ERR_PTR(ret);
 }
 EXPORT_SYMBOL_GPL(en75xx_voice_register_line);
 
 void en75xx_voice_unregister_line(struct en75xx_voice_line *line)
 {
-	if (line)
+	if (line) {
 		misc_deregister(&line->misc);
+		ida_free(&en75xx_voice_line_ida, line->line);
+	}
 }
 EXPORT_SYMBOL_GPL(en75xx_voice_unregister_line);
 

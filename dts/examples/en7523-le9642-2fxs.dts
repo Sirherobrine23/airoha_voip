@@ -29,6 +29,7 @@
 &pcm0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pcm_spi_pins>;
+	airoha,dma-channel-mask = <0x05>;
 	status = "okay";
 };
 

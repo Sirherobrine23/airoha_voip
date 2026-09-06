@@ -668,7 +668,7 @@ static void ProSLIC_LoadJMPHigh(proslicChanType *pProslic, uInt8 channel,
 /* Code assumes ProSLIC_LoadPatch has verified chip type. This is NOT meant to be called
  * by the user directly.
  */
-BOOLEAN ProSLIC_LoadPatch_extended(proslicChanType *pProslic,
+static BOOLEAN ProSLIC_LoadPatch_extended(proslicChanType *pProslic,
                                    const proslicPatch *pPatch, 
                                    BOOLEAN is_broadcast, BOOLEAN is_second_chan)
 {
@@ -4651,4 +4651,3 @@ int ProSLIC_EnableFastRingStart(proslicChanType_ptr pProslic, BOOLEAN isEnabled)
 
   return WriteReg(pProslic, pProslic->channel, PROSLIC_REG_USERSTAT, data);
 }
-

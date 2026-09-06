@@ -50,12 +50,12 @@ reg0x28 |= (0x5 << 16);
 An earlier reading of the vendor SLIC module in this project had `0x04`
 as a data register. It is not:
 
-| offset | flash driver name | meaning |
-|--------|-------------------|---------|
-| 0x00 | `SPI_FLASH_CTL` | bit 8 = start, bit 16 = busy, 7:0 = tx/rx counts |
-| 0x04 | `SPI_FLASH_OPCODE` | opcode, 8 bits |
-| 0x08 | `SPI_FLASH_DATA` | data |
-| 0x28 | `SPI_FLASH_MM` | chip select 31:29, clock divider 27:16 |
+| offset | flash driver name  | meaning                                          |
+| ------ | ------------------ | ------------------------------------------------ |
+| 0x00   | `SPI_FLASH_CTL`    | bit 8 = start, bit 16 = busy, 7:0 = tx/rx counts |
+| 0x04   | `SPI_FLASH_OPCODE` | opcode, 8 bits                                   |
+| 0x08   | `SPI_FLASH_DATA`   | data                                             |
+| 0x28   | `SPI_FLASH_MM`     | chip select 31:29, clock divider 27:16           |
 
 Only `0x00` and `0x28` were read correctly the first time. Any standalone
 "SIF" driver built on the earlier reading is wrong twice over: wrong

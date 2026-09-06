@@ -15,7 +15,40 @@
 #include <linux/types.h>
 
 #define G711_BIAS	0x84
-#define G711_CLIP	32635
+
+static inline int en75xx_ulaw_segment(int value)
+{
+	int segment = 0;
+
+	value >>= 7;
+	if (value & 0xf0) {
+		value >>= 4;
+		segment += 4;
+	}
+	if (value & 0x0c) {
+		value >>= 2;
+		segment += 2;
+	}
+	if (value & 0x02)
+		segment++;
+
+	return segment;
+}
+
+static inline int en75xx_alaw_segment(int value)
+{
+	static const u16 segment_end[8] = {
+		0x00ff, 0x01ff, 0x03ff, 0x07ff,
+		0x0fff, 0x1fff, 0x3fff, 0x7fff,
+	};
+	int segment;
+
+	for (segment = 0; segment < 8; segment++)
+		if (value <= segment_end[segment])
+			break;
+
+	return segment;
+}
 
 static inline s16 en75xx_ulaw_decode(u8 byte)
 {
@@ -30,26 +63,26 @@ static inline s16 en75xx_ulaw_decode(u8 byte)
 
 static inline u8 en75xx_ulaw_encode(s16 sample)
 {
-	static const u8 seg_end[8] = { 0x1f, 0x3f, 0x7f, 0xff,
-				       0x1ff, 0x3ff, 0x7ff, 0xfff };
-	int sign = (sample >> 8) & 0x80;
-	int value = sign ? -sample : sample;
-	int seg;
+	int value = sample;
+	int mask;
+	int segment;
+	u8 encoded;
 
-	if (value > G711_CLIP)
-		value = G711_CLIP;
-	value += G711_BIAS >> 2;
-	value >>= 2;
+	if (value < 0) {
+		value = G711_BIAS - value;
+		mask = 0x7f;
+	} else {
+		value += G711_BIAS;
+		mask = 0xff;
+	}
+	if (value > 0x7fff)
+		value = 0x7fff;
 
-	for (seg = 0; seg < 8; seg++)
-		if (value <= seg_end[seg])
-			break;
+	segment = en75xx_ulaw_segment(value);
+	encoded = (segment << 4) |
+		  ((value >> (segment + 3)) & 0x0f);
 
-	if (seg >= 8)
-		return (u8)(0x7f ^ sign);
-
-	return (u8)~(sign | (seg << 4) |
-		     ((value >> (seg + 1)) & 0x0f));
+	return encoded ^ mask;
 }
 
 static inline s16 en75xx_alaw_decode(u8 byte)
@@ -65,34 +98,31 @@ static inline s16 en75xx_alaw_decode(u8 byte)
 	else
 		sample = (mantissa << 4) + 8;
 
-	return sign ? (s16)-sample : (s16)sample;
+	return sign ? (s16)sample : (s16)-sample;
 }
 
 static inline u8 en75xx_alaw_encode(s16 sample)
 {
-	static const u8 seg_end[8] = { 0x1f, 0x3f, 0x7f, 0xff,
-				       0x1ff, 0x3ff, 0x7ff, 0xfff };
-	int sign = ((~sample) >> 8) & 0x80;
-	int value = sign ? sample : -sample;
-	int seg, out;
+	int value = sample;
+	int mask;
+	int segment;
+	u8 encoded;
 
-	if (value > G711_CLIP)
-		value = G711_CLIP;
+	if (value >= 0) {
+		mask = 0xd5;
+	} else {
+		mask = 0x55;
+		value = -value;
+	}
+	/* -32768 has no positive s16 counterpart. */
+	if (value > 0x7fff)
+		value = 0x7fff;
 
-	for (seg = 0; seg < 8; seg++)
-		if (value <= seg_end[seg])
-			break;
+	segment = en75xx_alaw_segment(value);
+	encoded = (segment << 4) |
+		  ((value >> (segment ? segment + 3 : 4)) & 0x0f);
 
-	if (seg >= 8)
-		return (u8)((0x7f ^ 0x55) | sign);
-
-	out = (seg << 4);
-	if (seg < 2)
-		out |= (value >> 4) & 0x0f;
-	else
-		out |= (value >> (seg + 3)) & 0x0f;
-
-	return (u8)((out | sign) ^ 0x55);
+	return encoded ^ mask;
 }
 
 #endif /* _EN75XX_G711_H */

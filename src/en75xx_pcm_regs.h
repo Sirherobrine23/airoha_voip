@@ -96,7 +96,8 @@
 #define EN75XX_PCM_INT_ERR		GENMASK(10, 6)
 #define EN75XX_PCM_INT_HOOK		(BIT(11) | BIT(12) | BIT(14) | \
 					 BIT(15) | BIT(16))
-#define EN75XX_PCM_INT_ALL		GENMASK(8, 2)
+#define EN75XX_PCM_INT_ALL		GENMASK(10, 2)
+#define EN75XX_PCM_ISR_VALID		GENMASK(10, 0)
 #define EN75XX_PCM_INT_OEM_MASK		0x5828
 
 /* Descriptor status word, identical in both generations. */

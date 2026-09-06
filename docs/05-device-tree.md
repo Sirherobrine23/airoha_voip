@@ -15,53 +15,38 @@ probes will arm its DMA against a SLIC that is not there.
 
 ## pcm@1fbd0000
 
-| property | required | notes |
-|----------|----------|-------|
-| `compatible` | yes | `econet,en751221-pcm`, `econet,en7528-pcm`, `airoha,en7523-pcm` |
-| `reg` / `reg-names` | `pcm` yes | plus optional `sys` (0x1fb00000) and `chip` (0x1fa20000) |
-| `interrupts` | no | `GIC_SPI 27` on the ARM parts; omit to run the polling worker |
-| `airoha,pcm-interface-control` | no | default `0xf5071306` |
-| `airoha,pcm-reset-mask` | no | bit in SYS 0x834; default `0x800` |
-| `airoha,tx-slot-config` | no | 4 × u32, two slots per word |
-| `airoha,rx-slot-config` | no | same |
-| `airoha,pcm-big-endian` | no | swap 16-bit samples in the DMA buffer |
-| `airoha,configure-pcm-pins` | no | let the driver set the pinmux |
+| property                       | required | notes                                                                                  |
+| ------------------------------ | -------- | -------------------------------------------------------------------------------------- |
+| `compatible`                   | yes      | `econet,en751221-pcm`, `econet,en7528-pcm`, `airoha,en7523-pcm`                        |
+| `reg` / `reg-names`            | yes      | one PCM range named `pcm`                                                              |
+| `interrupts`                   | no       | vendor EN7523 candidate is `GIC_SPI 27`; validate on the board, or omit to use polling |
+| `resets` / `reset-names`       | no       | use the SoC reset provider and the name `pcm`                                          |
+| `airoha,pcm-interface-control` | no       | default `0xf5071306`                                                                   |
+| `airoha,tx-slot-config`        | no       | 4 × u32, two slots per word                                                            |
+| `airoha,rx-slot-config`        | no       | same                                                                                   |
+| `airoha,dma-channel-mask`      | no       | gen1 supports `0xff`, EN7523 supports `0x0f`; configure all channels a board may open  |
+| `airoha,pcm-big-endian`        | no       | swap 16-bit samples in the DMA buffer                                                  |
 
-## Two device tree styles
+## Ownership of SCU resources
 
-Upstream and the vendor model the control blocks differently, and the
-drivers accept both.
+The current kernel already exposes the shared SCU resources through
+pinctrl, reset and clock providers. The PCM driver therefore maps only
+its own register window. It does not map the NP/chip SCUs, write
+`0x834`, or change the pinmux behind the corresponding framework.
 
-Upstream (`arch/arm64/boot/dts/airoha/en7523.dtsi`) exposes them as
-syscons and expects phandles:
+The reset IDs used by the supplied fragments are:
 
-```
-airoha,scu = <&scuclk>;         /* system-controller@1fb00000 */
-airoha,chip-scu = <&chip_scu>;  /* syscon@1fa20000            */
-```
+| block         | EN751221                    | EN7528                    | EN7523                                 |
+| ------------- | --------------------------- | ------------------------- | -------------------------------------- |
+| PCM1 engine   | `EN751221_PCM1_RST`         | `EN7528_PCM1_RST`         | `EN7523_PCM1_RST`                      |
+| PCM2 engine   | `EN751221_PCM2_RST`         | `EN7528_PCM2_RST`         | not exposed as a separate engine reset |
+| ZSI wrapper 1 | `EN751221_PCM1_ZSI_ISI_RST` | `EN7528_PCM1_ZSI_ISI_RST` | `EN7523_PCM1_ZSI_ISI_RST`              |
+| ZSI wrapper 2 | `EN751221_PCM2_ZSI_ISI_RST` | `EN7528_PCM2_ZSI_ISI_RST` | `EN7523_PCM2_ZSI_ISI_RST`              |
 
-The vendor trees instead put raw ranges in each consumer's `reg`:
-
-```
-reg = <0x1fbd0000 0x1000>, <0x1fb00000 0x1000>, <0x1fa20000 0x1000>;
-reg-names = "pcm", "sys", "chip";
-```
-
-Prefer the phandles where the tree offers them: a regmap serialises
-against the other users of the block, and there is no address to get
-wrong. The raw form is the fallback.
-
-The `sys` and `chip` ranges overlap the SoC's SCU node on purpose --
-the vendor tree has `scu@1fb00000` covering both `0x1fb00000` and
-`0x1fa20000`. The driver maps them with plain `devm_ioremap` rather
-than `devm_ioremap_resource` so the regions are not claimed
-exclusively; otherwise whichever driver probed second would fail with
-`-EBUSY`. The same applies to the ZSI node, which needs the same two
-ranges.
-
-Without `sys` and `chip` the driver cannot reset the block or configure
-the PCM pins. It will still probe, which makes for a confusing failure —
-map both unless you know you do not need them.
+These are binding IDs, not the raw register bit numbers. In particular,
+the old draft's `0x1000` for PCM2 was wrong: the current MIPS reset
+provider maps PCM2 to RST_CTRL1 bit 4. Bit 25 is named `SFC2_PCM_RST`;
+it must not be treated as a generic SPI or SLIC reset.
 
 The vendor trees model the whole thing as a single node --
 `pcm@bfbd0000` with `reg = <0x1fbd0000 0x4fff>`, identical on EN7523,
@@ -78,8 +63,16 @@ generations, which is why the three fragments look nearly identical.
 
 ## zsi@1fbd1000
 
-Needs all three ranges (`zsi`, `sys`, `scu`): entering ZSI mode changes
-the interface mode, the pinmux and the PCM clock, not just the wrapper.
+The modern form has one `zsi` register range, a `zsi` reset, pinctrl and,
+where exposed, a clock named `slic`. EN7523 provides `EN7523_CLK_SLIC`;
+this is the SLIC control clock and must not be attached to the PCM node
+as if it were the PCM bit/frame clock.
+
+EN751221 currently has no SLIC clock in its clock provider. The supplied
+EN751221 fragment therefore opts into `airoha,legacy-scu-programming`,
+which retains the vendor-derived route/clock sequence. That sequence is
+verified only on EN751221 and the driver rejects the property on EN7528
+and EN7523. EN7528 ZSI clock/routing still needs board-level validation.
 
 `airoha,zsi-gap-us` defaults to 5000. The wrapper acknowledges a byte as
 soon as it has sent it, but the SLIC still has to clock it over the
@@ -102,55 +95,54 @@ pinctrl-names = "default";
 pinctrl-0 = <&pcm1_pins>;
 ```
 
-Both the PCM and the ZSI driver check for a `pinctrl-0` property and
-skip their internal mux writes when they find one, so a tree that uses
-pinctrl and a tree that uses `airoha,configure-pcm-pins` both work and
-neither fights the other.
+The PCM driver never writes pinmux registers. The ZSI driver also leaves
+them to pinctrl, except inside the explicit EN751221 legacy mode when no
+`pinctrl-0` state is present.
 
 Groups and mux bits differ per SoC. All three keep them in `chip_scu`,
 at different offsets:
 
 **EN7523** — `chip_scu + 0x214` (`REG_GPIO_SPI_CS1_MODE`)
 
-| group | pins | bit |
-|-------|------|-----|
-| `pcm1` | 24-27 | 12 |
-| `pcm2` | 16-19 | 13 |
-| `pcm_spi` | 16-19, 24-27 | 16 |
-| `pcm_spi_rst` / `pcm_spi_int` | 14 / 15 | 8 / 9 |
-| `pcm_spi_cs1..cs4` | 22, 39, 20, 23 | 17-21 |
+| group                         | pins           | bit   |
+| ----------------------------- | -------------- | ----- |
+| `pcm1`                        | 24-27          | 12    |
+| `pcm2`                        | 16-19          | 13    |
+| `pcm_spi`                     | 16-19, 24-27   | 16    |
+| `pcm_spi_rst` / `pcm_spi_int` | 14 / 15        | 8 / 9 |
+| `pcm_spi_cs1..cs4`            | 22, 39, 20, 23 | 17-21 |
 
 **EN751221** — `chip_scu + 0x104` (`REG_IOMUX_CONTROL1`)
 
-| group | pins | bit |
-|-------|------|-----|
-| `pcm1` | 25-28 | 13 |
-| `pcm2` | 17-20 | 14 |
-| `pcm_spi` | 17-20 | 12 |
+| group                         | pins    | bit     |
+| ----------------------------- | ------- | ------- |
+| `pcm1`                        | 25-28   | 13      |
+| `pcm2`                        | 17-20   | 14      |
+| `pcm_spi`                     | 17-20   | 12      |
 | `pcm_spi_rst` / `pcm_spi_int` | 15 / 16 | 10 / 11 |
-| `pcm_spi_cs3` / `cs4` | 16 / 22 | 8 / 9 |
+| `pcm_spi_cs3` / `cs4`         | 16 / 22 | 8 / 9   |
 
 **EN7528** — `chip_scu + 0x15c` (`REG_PON_I2C_MODE`), chip selects 2-7 in
 `REG_FORCE_GPIO22_EN`
 
-| group | pins | bit |
-|-------|------|-----|
-| `pcm1` | 12-15 | 19 |
-| `pcm2` | 24-27 | 20 |
-| `pcm_spi` | 4-7 | 18 |
-| `pcm_spi_rst` / `pcm_spi_int` | 2 / 1 | 16 / 17 |
-| `pcm_spi_cs1` | 3 | 14 |
-| `pcm_spi_cs2..cs7` | 10, 23, 21, 9, 28, 29 | 10-15 (other reg) |
+| group                         | pins                  | bit               |
+| ----------------------------- | --------------------- | ----------------- |
+| `pcm1`                        | 12-15                 | 19                |
+| `pcm2`                        | 24-27                 | 20                |
+| `pcm_spi`                     | 4-7                   | 18                |
+| `pcm_spi_rst` / `pcm_spi_int` | 2 / 1                 | 16 / 17           |
+| `pcm_spi_cs1`                 | 3                     | 14                |
+| `pcm_spi_cs2..cs7`            | 10, 23, 21, 9, 28, 29 | 10-15 (other reg) |
 
 ### Whether `pcm_spi` steals PCM pins depends on the SoC
 
 This is the part that does not generalise:
 
-| SoC | `pcm_spi` pins | overlap |
-|-----|----------------|---------|
-| EN7523 | 16-19, 24-27 | **both** PCM buses |
-| EN751221 | 17-20 | **pcm2** only |
-| EN7528 | 4-7 | **none** |
+| SoC      | `pcm_spi` pins | overlap            |
+| -------- | -------------- | ------------------ |
+| EN7523   | 16-19, 24-27   | **both** PCM buses |
+| EN751221 | 17-20          | **pcm2** only      |
+| EN7528   | 4-7            | **none**           |
 
 So on EN7523 the multiplexed SLIC control channel costs you both PCM
 buses, on EN751221 it costs you the second one, and on EN7528 it costs
@@ -160,14 +152,12 @@ says it was meant for many more FXS lines than the others.
 On EN751221 there is a second trap: `pcm_spi_int` and `pcm_spi_cs3` are
 both gpio 16. Pick one.
 
-### The register the driver used to poke
+### The legacy EN751221 register sequence
 
-`airoha,configure-pcm-pins` makes the driver write `chip_scu + 0x104`
-itself. On EN751221 that is exactly `REG_IOMUX_CONTROL1`, the register
-upstream pinctrl manages -- the two would fight. Both the PCM and the
-ZSI driver check for a `pinctrl-0` property and skip their internal mux
-writes when they find one, so an upstream tree and a vendor tree both
-work.
+The old draft wrote `chip_scu + 0x104` from both PCM and ZSI code. On
+EN751221 this is exactly `REG_IOMUX_CONTROL1`, owned by pinctrl, so that
+write was removed from the PCM driver. The only retained raw sequence is
+the opt-in ZSI compatibility path described above.
 
 For the record, the vendor-derived constants decode cleanly against the
 EN751221 pinctrl: the mask `0x7d00` is bits 8, 10, 11, 12 and 14 --
@@ -175,37 +165,29 @@ EN751221 pinctrl: the mask `0x7d00` is bits 8, 10, 11, 12 and 14 --
 the value `0x2000` is bit 13, `pcm1`. "Enable the pcm1 mux, clear the
 SLIC control bits."
 
-## No PCM reset in the SCU binding
-
-`econet,en751221-scu.h` and `econet,en7528-scu.h` define FE, GSW, GDMA
-and XPON resets; neither has a PCM line. So the block is reset through
-the raw bit in NP SCU `0x834` (`airoha,pcm-reset-mask`) rather than
-`resets = <&scuclk ...>`. If a PCM reset ID appears in those headers
-later, switching is the obvious cleanup.
-
 ## SLIC nodes
 
 Le9642, child of the ZSI node:
 
-| property | notes |
-|----------|-------|
-| `compatible` | `microsemi,le9642`, `microsemi,le9641`, `microchip,le9642` |
-| `airoha,zsi` | phandle to the transport |
-| `airoha,pcm` | phandle to the PCM instance |
-| `airoha,lines` | 1 or 2 |
-| `airoha,bus-slots` | one PCM **bus** timeslot per line |
-| `airoha,a-law` | u-law is the default |
+| property           | notes                                                      |
+| ------------------ | ---------------------------------------------------------- |
+| `compatible`       | `microsemi,le9642`, `microsemi,le9641`, `microchip,le9642` |
+| `airoha,zsi`       | phandle to the transport                                   |
+| `airoha,pcm`       | phandle to the PCM instance                                |
+| `airoha,lines`     | 1 or 2                                                     |
+| `airoha,bus-slots` | one PCM **bus** timeslot per line                          |
+| `airoha,a-law`     | u-law is the default                                       |
 
 ProSLIC, child of an SPI controller:
 
-| property | notes |
-|----------|-------|
-| `compatible` | `silabs,si32192`, `silabs,si3219x` |
-| `spi-cpha`, `spi-cpol` | mode 3; the driver asks for it anyway |
-| `spi-max-frequency` | 10 MHz, per MediaTek's own integration |
-| `airoha,pcm` | phandle to the PCM instance |
-| `airoha,pcm-channel` | DMA channel, not a bus slot |
-| `reset-gpios` | optional |
+| property               | notes                                  |
+| ---------------------- | -------------------------------------- |
+| `compatible`           | `silabs,si32192`, `silabs,si3219x`     |
+| `spi-cpha`, `spi-cpol` | mode 3; the driver asks for it anyway  |
+| `spi-max-frequency`    | 10 MHz, per MediaTek's own integration |
+| `airoha,pcm`           | phandle to the PCM instance            |
+| `airoha,pcm-channel`   | DMA channel, not a bus slot            |
+| `reset-gpios`          | optional                               |
 
 The SPI controller these nodes attach to is the same one the boot flash
 uses. Give the SLIC its own chip select, and expect flash erases to
@@ -218,9 +200,15 @@ takes a **DMA channel**. They are not the same number: the RX DMA lands
 a slot's audio on channel `slot - 4`, so bus slot 4 is DMA channel 0 and
 bus slot 6 is DMA channel 2.
 
-Two lines sharing a slot is the failure worth naming, because it does
-not look like a failure: both probe fine and the second line is simply
-silent.
+The Le9642 driver now rejects slots below 4, slots outside the eight
+known DMA channels, and duplicate slots. The PCM driver separately
+rejects a line whose DMA channel is outside `airoha,dma-channel-mask` or
+the SoC limit. This turns the old silent-line failure into a probe/open
+error with a useful message.
+
+The configured DMA mask stays constant while the engine runs. Opening
+or closing an additional FXS line only changes which FIFO is consumed;
+it no longer tears down and restarts a call already in progress.
 
 ## Timeslot words
 

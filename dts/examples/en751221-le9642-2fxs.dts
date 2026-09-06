@@ -20,6 +20,7 @@
 };
 
 &pcm0 {
+	airoha,dma-channel-mask = <0x05>;
 	status = "okay";
 };
 

@@ -55,6 +55,10 @@ struct en75xx_proslic_fw {
 	char	name[64];
 };
 
+/* Fixed names consumed by the vendor Si3219x API during ProSLIC_Init(). */
+extern proslicPatch si3219xPatchRevALCQC;
+extern proslicPatch RevAPatch;
+
 /*
  * Loads en75xx/proslic/<chipset>_<rev>_<bom>.fw, falling back to
  * <chipset>_<rev>.fw when @bom is NULL or the BOM-specific blob is
