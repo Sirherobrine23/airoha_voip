@@ -4,12 +4,48 @@
  *
  * Sources of truth, in order of authority:
  *
- *  1. The vendor pcm1.ko "regMap" table (name/mask/address/reset per
- *     register) recovered from .data on EN7523, EN751221 and EN7528.
- *  2. The vendor debug printk in descGet(), which literally names the
- *     status fields: "ownership", "chvaild", "sample size".
+ *  1. The "regMap" table in the vendor pcm1.ko. The copy shipped in the
+ *     TP-Link VB430 GPL drop (Airoha AN7551/AN7581 LTS SDK, under
+ *     tclinux_phoenix/release_bsp/<profile>/BSP/voip_bsp/voip_module/ko)
+ *     is not
+ *     stripped, so the table can be read directly: each entry is
+ *     { const char *name; u32 flags; u32 writable_mask; u32 address;
+ *       u32 reset; }. Every offset below is quoted from it.
+ *  2. The vendor debug printk in descGet().
  *  3. Register values read back from a stock EN751221 with the OEM
  *     voice stack running.
+ *
+ * The vendor table, verbatim (addresses are the MIPS KSEG1 form of
+ * 0x1fbd0000 + offset, and are identical on the ARM parts):
+ *
+ *   name                offset  writable mask  reset
+ *   pcmCtrl             0x00    0x1f7f1f1f     0x0500040a
+ *   txTimeSlotCfg0..3   0x04..0x10  0x13ff13ff 0x00080000, 0x00180010,
+ *                                              0x00280020, 0x00380030
+ *   rxTimeSlotCfg0..3   0x14..0x20  0x13ff13ff same resets as tx
+ *   ISR                 0x24    0x000007ff     0x00000000
+ *   INTMask             0x28    0x000007ff     0x00000000
+ *   txPolling           0x2c    0xffffffff     0x00000000
+ *   rxPolling           0x30    0xffffffff     0x00000000
+ *   txRingBaseAddr      0x34    0xffffffff     0x00000000
+ *   rxRingBaseAddr      0x38    0xffffffff     0x00000000
+ *   txrxRingSizeAndOff  0x3c    0x000000ff     0x000000c0
+ *   txRxDMA             0x40    0x0000000f     0x0f000000
+ *   txTimeSlotCfg4..15  0x48..0x74  0x13ff13ff 0x00480040 .. 0x00f800f0
+ *   rxTimeSlotCfg4..15  0x78..0xa4  0x13ff13ff 0x00480040 .. 0x00f800f0
+ *   txRxChanEnable      0xac    0x0000000f     0x0000000f
+ *
+ * Three things follow from that table and are worth stating plainly,
+ * because earlier revisions of this driver got them wrong:
+ *
+ *  - There is no register at 0xa8. An earlier draft wrote 0xa0 there
+ *    during EN7523 start-up; that write went nowhere.
+ *  - ISR and INTMask are eleven bits wide. Interrupt bits above 10 --
+ *    and therefore the "OEM interrupt mask 0x5828" an earlier draft
+ *    programmed -- do not exist.
+ *  - The reset of txrxRingSizeAndOff really is 0xc0, which is why the
+ *    driver must program it: with the reset value the RX descriptor
+ *    ownership bit never clears.
  *
  * IMPORTANT: the descriptor layout is NOT the same across generations.
  *
@@ -24,6 +60,14 @@
  *       ring + n * 0xc, writes the channel mask as a full word at +4
  *       and a single buffer pointer at +8; descGet() dumps only buf0.
  *       -> u32 status; u32 ch_valid; u32 buf_addr;
+ *
+ * The gen2 reading is corroborated by the AN7581 pcm1.ko, whose
+ * descGet() format string is
+ *
+ *     desc status:0x%08lx(ownership:%d,sample size:%u)
+ *
+ * with no channel-mask field, against the gen1 string that also prints
+ * "chvaild".
  *
  * Both generations have 15 descriptors per ring: the vendor index
  * arithmetic is "% 0xf" in both, and both allocations divide evenly.
@@ -46,11 +90,19 @@
 #define EN75XX_PCM_RING_CFG		0x3c
 #define EN75XX_PCM_DMA_CTRL		0x40
 
-/* gen2 only: timeslot cfg 4..15 and the per-channel enable register */
-#define EN7523_PCM_TX_SLOT4		0x48
-#define EN7523_PCM_RX_SLOT4		0x78
-#define EN7523_PCM_V2_CFG		0xa8
-#define EN7523_PCM_CHAN_ENABLE		0xac
+/*
+ * Timeslot configuration registers 4..15, and the per-channel enable.
+ * The vendor regMap lists all of them unconditionally, but only the
+ * gen2 parts are known to act on them; the driver programs the first
+ * four registers, which already cover the eight channels the DMA
+ * engine exposes.
+ */
+#define EN75XX_PCM_TX_SLOT4		0x48
+#define EN75XX_PCM_RX_SLOT4		0x78
+#define EN75XX_PCM_CHAN_ENABLE		0xac
+
+/* Number of timeslot-config registers the driver programs (2 slots each). */
+#define EN75XX_PCM_SLOT_REGS		4
 
 /*
  * IFACE_CTRL. Bit positions come from the vendor pcmConfigSetup(), which
@@ -58,7 +110,12 @@
  * (bit delay), bit 26 (config commit) and bit 24 (soft reset) have
  * dedicated vendor helpers confirming them; for the rest the driver
  * prefers the whole-register value observed on stock firmware.
+ *
+ * The regMap writable mask is 0x1f7f1f1f, so bits 31:29, 23, and 15:13
+ * are not writable. The observed value below sets bits 31:28; only the
+ * 0x15071306 part of it actually lands.
  */
+#define EN75XX_PCM_CTRL_WRITABLE	0x1f7f1f1fu
 #define EN75XX_PCM_CTRL_PROBE		GENMASK(30, 28)
 #define EN75XX_PCM_CTRL_CFG_VALID	BIT(26)	/* commit: clear, then set */
 #define EN75XX_PCM_CTRL_LOOPBACK	BIT(25)
@@ -71,20 +128,33 @@
 /* Read back from stock EN751221 with the OEM voice stack running. */
 #define EN75XX_PCM_CTRL_OEM		0xf5071306
 
-/* Timeslot config: two slots per register. */
+/*
+ * Timeslot config: two slots per register, writable mask 0x13ff13ff.
+ *
+ * The NUM field is a bit offset into the 8 kHz frame, not a byte-slot
+ * index. The vendor reset values settle it: channel 0 resets to 0,
+ * channel 1 to 8, channel 2 to 16 ... channel 31 to 248, i.e. channel
+ * n starts at bit n * 8. A byte timeslot s therefore sits at bit
+ * offset s * 8, and a 16-bit channel occupies two byte timeslots.
+ */
 #define EN75XX_PCM_TS_LO_WIDE		BIT(12)		/* 1 = 16-bit slot */
 #define EN75XX_PCM_TS_LO_NUM		GENMASK(9, 0)
 #define EN75XX_PCM_TS_HI_WIDE		BIT(28)
 #define EN75XX_PCM_TS_HI_NUM		GENMASK(25, 16)
+
+#define EN75XX_PCM_BITS_PER_SLOT	8
+
+/* Bit offset in the frame for byte timeslot @slot. */
+#define EN75XX_PCM_SLOT_TO_BIT(slot)	((slot) * EN75XX_PCM_BITS_PER_SLOT)
 
 #define EN75XX_PCM_DMA_TX_EN		BIT(0)
 #define EN75XX_PCM_DMA_RX_EN		BIT(1)
 #define EN75XX_PCM_DMA_CH_MASK		GENMASK(31, 24)
 
 /*
- * ISR/IMR. Bits 3 and 5 and the error group 10:6 are confirmed by the
- * vendor ISR; bits 11..16 carry SLIC hook-status changes, which is why
- * the OEM mask is 0x5828 and not just the DMA bits.
+ * ISR/IMR. The regMap writable mask is 0x000007ff: the block implements
+ * eleven interrupt bits and nothing above them. Bits 3 and 5 and the
+ * error group 10:6 are confirmed by the vendor ISR.
  */
 #define EN75XX_PCM_INT_TX_DESC		BIT(2)
 #define EN75XX_PCM_INT_RX_DESC		BIT(3)
@@ -94,11 +164,8 @@
 #define EN75XX_PCM_INT_RX_OVERRUN	BIT(7)
 #define EN75XX_PCM_INT_AHB_ERR		BIT(8)
 #define EN75XX_PCM_INT_ERR		GENMASK(10, 6)
-#define EN75XX_PCM_INT_HOOK		(BIT(11) | BIT(12) | BIT(14) | \
-					 BIT(15) | BIT(16))
 #define EN75XX_PCM_INT_ALL		GENMASK(10, 2)
 #define EN75XX_PCM_ISR_VALID		GENMASK(10, 0)
-#define EN75XX_PCM_INT_OEM_MASK		0x5828
 
 /* Descriptor status word, identical in both generations. */
 #define EN75XX_PCM_DESC_OWN		BIT(31)
@@ -131,12 +198,5 @@ struct en75xx_pcm_desc_v2 {
 	u32 ch_valid;
 	u32 buf_addr;
 };
-
-/*
- * The SLIC's TXSLOT/RXSLOT is a PCM *bus* timeslot; the RX DMA lands
- * that audio on a DMA channel offset from it. Determined empirically on
- * EN751221: bus slot 4 -> DMA channel 0, bus slot 6 -> DMA channel 2.
- */
-#define EN75XX_PCM_SLOT_TO_DMA_CH(slot)	((slot) - 4)
 
 #endif /* _EN75XX_PCM_REGS_H */

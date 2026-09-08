@@ -35,12 +35,13 @@ still needs per-board electrical and runtime validation.
 
 | Piece | State |
 |-------|-------|
+| PCM register map | confirmed against the vendor `pcm1.ko` regMap; see `docs/07` |
 | PCM gen1 (EN751221/EN7528) | implemented from vendor layout; bench validation required |
 | PCM gen2 (EN7523) | corrected to 12-byte descriptors and `CHAN_ENABLE`; hardware validation required |
 | G.711 and `/dev/en75xx-fxsN` | kernel-reference companding and endian paths corrected; integration test required |
 | ZSI transport | EN751221 legacy sequence retained explicitly; modern EN7523 resources wired, runtime validation required |
-| Le9642: profiles, feed, ring cadence, hook, audio | prototype based on recovered and observed behavior; not generally validated |
-| Si3219x over SPI | implemented against the ProSLIC API; untested on hardware |
+| Le9642: profiles, slots, feed, ring cadence, hook | profiles and timeslot handling now match the vendor API; bench validation required |
+| Si3219x over SPI | implemented against the ProSLIC API; note that Airoha lists the Si32192 as an ISI part |
 | MaxLinear PEF32001/PEF32002 (DUSLIC-XS) | not started; firmware blobs identified |
 | Asterisk channel driver | draft implementation; build/runtime testing against the target Asterisk version required |
 
@@ -53,25 +54,38 @@ clock it over the 8 kHz bus. Driving it as plain SPI leaves it
 electrically mute, which looks exactly like a dead board. The ProSLIC
 parts are ordinary SPI devices and use the Linux SPI subsystem.
 
-## Why the Le9642 runs G.711 and not 16-bit linear
+## The Le9642 transmit slot, and why G.711 is no longer the default
 
-The chip drives only 8 bits per timeslot. With a linear codec the other
-byte of every 16-bit slot is zero, so quiet speech quantises to silence
-and the audio cuts out between words. Running the codec in u-law and
-companding in the PCM data path fixes it; the character device stays
-16-bit linear, so userspace never sees the difference.
+ZSI adds two PCLK cycles of delay on the transmit side. The Microchip
+API compensates by programming the transmit timeslot one byte slot
+*below* the wanted bus slot and letting the device profile's clock-slot
+field add six clocks back, which nets the −2 that cancels the delay.
 
-Capture always carries the code in the low byte of the slot. Playback
-does not necessarily use the same byte, because the SLIC uses different
-clock-slot offsets in each direction — hence the `tx_msb` parameter.
+Leave the shift out and transmit audio is exactly one byte late. That
+looks like the SLIC using a different byte of the 16-bit slot in each
+direction, and it makes the 16-bit linear codec produce nonsense, which
+is why an earlier revision here ran the codec in u-law with a `tx_msb`
+byte selector. Both were symptoms. The driver now applies the shift and
+defaults to 16-bit linear, the same as the vendor's own integration.
+
+The G.711 modes remain available (`codec=ulaw`, `codec=alaw`, or
+`airoha,a-law` in the device tree); companding then happens in the PCM
+data path and the character device stays 16-bit linear either way.
 
 ## Timeslots and DMA channels
 
-The SLIC's `TXSLOT`/`RXSLOT` is a PCM **bus** timeslot. The RX DMA lands
-that audio on a DMA channel offset from it: `dma_channel = bus_slot - 4`
-on EN751221. Two simultaneous lines need their own slots (4 and 6, i.e.
-DMA channels 0 and 2). The per-descriptor buffer stride always uses the
-8-channel layout even when the channel-valid mask only enables four.
+The SLIC's `TXSLOT`/`RXSLOT` is a PCM **bus** timeslot; the DMA engine
+numbers channels. The two are related only by the PCM engine's timeslot
+table, whose slot field is a *bit offset into the frame*, so there is no
+fixed formula. With this driver's default table channel n sits at bit
+offset 32 + n·16, that is at bus slot 4 + n·2, so slots 4 and 6 are DMA
+channels 0 and 1.
+
+The SLIC drivers ask the PCM driver to resolve a slot rather than
+computing it, and a slot no channel covers fails the probe with a
+message instead of producing a silent line. The per-descriptor buffer
+stride always uses the 8-channel layout even when the channel-valid
+mask only enables four.
 
 ## Interrupts
 
@@ -124,3 +138,6 @@ source files.
    flash's SPI controller, and what that costs during flash writes.
 7. `docs/correcoes-do-draft-pt-BR.md` / `docs/draft-corrections-en-US.md`
    — what was corrected, what is confirmed, and what remains to prove.
+8. `docs/07-gpl-sdk-crosscheck.md` — what the Airoha LTS SDK sources
+   shipped in the TP-Link VB430 GPL drop confirmed, and what they
+   contradicted.

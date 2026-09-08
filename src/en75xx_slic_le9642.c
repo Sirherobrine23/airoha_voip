@@ -9,17 +9,24 @@
  * gains, does not touch the PCM audio path, and its "robust" CALCTRL
  * disconnect sequence actively breaks the switcher write below.
  *
- * Four things here are load-bearing and were expensive to find:
+ * Five things here are load-bearing:
  *
  *  1. Never send MPI HWRESET (0x04). It drops the SLIC out of ZSI mode
  *     into a state only a physical power cycle recovers from.
- *  2. The AC profile carries a 6-byte VpProfile header. Streaming it
- *     with the header misaligns every filter coefficient and produces a
- *     self-sustaining hybrid oscillation, so it is streamed from +6.
- *  3. The switcher, not calibration, is the feed gate: a direct
+ *  2. Every profile carries a 6-byte VpProfile header, and the length of
+ *     its raw-MPI section is byte 5 of that header -- not "everything
+ *     after the header". Streaming the trailing formatted-parameter
+ *     bytes as if they were MPI leaves a stray opcode in the stream.
+ *  3. In ZSI mode the transmit timeslot must be programmed one slot
+ *     BELOW the wanted bus slot. See le9642_program_slots().
+ *  4. The switcher, not calibration, is the feed gate: a direct
  *     SWCTRL = 0x6f enables the feed.
- *  4. SIGREG is a device-level 4-byte register with each channel's HOOK
+ *  5. SIGREG is a device-level 4-byte register with each channel's HOOK
  *     bit in its own byte, so the hook index is (ec - 1), not 0.
+ *
+ * Points 2 and 3 are confirmed against the Microchip VoicePath API-II
+ * sources and the EcoNet mod-slic3 integration shipped in the TP-Link
+ * VB430 GPL drop (Airoha AN7551/AN7581 LTS SDK).
  *
  * The ring voltage corrupts the SIGREG hook bit, so ringing runs on a
  * cadence and the hook is only sampled during the off gaps.
@@ -43,6 +50,8 @@
 #define VP886_R_TXSLOT_WRT		0x40
 #define VP886_R_TXSLOT_RD		0x41
 #define VP886_R_RXSLOT_WRT		0x42
+#define VP886_R_CLKSLOTS_WRT		0x44
+#define VP886_R_CLKSLOTS_RD		0x45
 #define VP886_R_SIGREG_RD		0x4d	/* no update latch */
 #define VP886_R_SIGREG_LATCH_RD		0x4f
 #define VP886_R_STATE_WRT		0x56
@@ -78,47 +87,102 @@
 
 #define VP886_SWCTRL_ON			0x6f	/* HP/HP */
 
-/* OPFUNC: CODEC_ULAW 0x40 | all filters 0x3f */
-#define VP886_OPFUNC_ULAW		0x7f
-#define VP886_OPFUNC_ALAW		0x3f
+/*
+ * OPFUNC bits 7:6 select the codec (A-law 0x00, u-law 0x40, 16-bit
+ * linear 0x80); bits 5:0 enable the audio filters and are always on.
+ * The EcoNet reference integration runs these parts with the linear
+ * codec, which is what the PCM engine's 16-bit timeslots expect.
+ */
+#define VP886_OPFUNC_ALL_FILTERS	0x3f
+#define VP886_OPFUNC_ALAW		(0x00 | VP886_OPFUNC_ALL_FILTERS)
+#define VP886_OPFUNC_ULAW		(0x40 | VP886_OPFUNC_ALL_FILTERS)
+#define VP886_OPFUNC_LINEAR		(0x80 | VP886_OPFUNC_ALL_FILTERS)
 
 #define VP886_SIGREG_LEN		4
 #define VP886_SIGREG_HOOK		0x01
 
-/* ring cadence, in 150 ms ticks */
+/*
+ * Ring cadence. The tick worker also samples the hook, so the tick is
+ * the resolution of both. The defaults are 750 ms on / 1050 ms off; a
+ * caller that asks for a cadence gets it rounded to a whole tick.
+ */
 #define RING_TICK_MS			150
-#define RING_ON_TICKS			5	/* ~0.75 s on  */
-#define RING_PERIOD_TICKS		12	/* ~1.05 s off */
+#define RING_ON_TICKS_DEFAULT		5	/* ~0.75 s on  */
+#define RING_PERIOD_TICKS_DEFAULT	12	/* ~1.05 s off */
 #define HOOK_DEBOUNCE			3
 
 /*
- * Raw MPI sections of the ZLR964124_Le9641 BB profiles in ZSI mode.
- * Each opcode self-delimits, so the whole section is streamed as-is.
+ * Le9641/Le9642 profiles, quoted whole from the EcoNet mod-slic3
+ * sources (ZLR964124_Le9641_BB_profiles.c) so that the six-byte
+ * VpProfile header travels with the data.
+ *
+ * Header layout, from the VoicePath API-II VpProfileHeaderFieldType:
+ *
+ *	[0] type MSB   [1] type LSB   [2] index
+ *	[3] length - 4 [4] version    [5] raw-MPI section length
+ *	[6..] raw MPI, then formatted parameters
+ *
+ * Only the raw-MPI section is streamed, and its length is byte 5. The
+ * AC profile is the one where this matters: it is 80 bytes long but its
+ * MPI section is 73, so streaming "everything after the header" pushes
+ * one extra byte down the bus, where the SLIC reads it as an opcode.
  */
-static const u8 dev_mpi[] = {	/* DEV_PROFILE_100V_BB_124_ZSI */
-	0x46, 0x02, 0x44, 0x06, 0x5e, 0x14, 0x00, 0xf6, 0x95, 0x00,
+#define VP_PROFILE_MPI_LEN	5
+#define VP_PROFILE_DATA_START	6
+
+/*
+ * DEV_PROFILE_100V_BB_124_ZSI. Byte 9 -- the operand of the 0x44
+ * CLKSLOTS write -- is 0x46 and not 0x06: bit 6 is the transmit clock
+ * edge (XE), which the vendor patches to "positive" for every ZSI
+ * board, and bits 2:0 are the +6 PCLK transmit clock slot that pairs
+ * with the timeslot shift in le9642_program_slots().
+ */
+static const u8 dev_profile[] = {
+	0x0d, 0xff, 0x00, 0x28, 0x04, 0x14,
+	0x46, 0x02, 0x44, 0x46, 0x5e, 0x14, 0x00, 0xf6, 0x95, 0x00,
 	0x58, 0x30, 0x5c, 0x30, 0xe4, 0x44, 0x92, 0x0a, 0xe6, 0x60,
+	/* formatted parameters, not streamed */
+	0x00, 0xa0, 0x00, 0x00, 0x01, 0x30, 0x14, 0x30, 0x14, 0x30,
+	0x14, 0xff, 0x95, 0x00, 0x62, 0x62, 0x04, 0x3c,
 };
 
-static const u8 dc_mpi[] = {	/* DC_FXS_miSLIC_BB_DEF */
+/* DC_FXS_miSLIC_BB_DEF */
+static const u8 dc_profile[] = {
+	0x0d, 0x01, 0x00, 0x0c, 0x02, 0x03,
 	0xc6, 0x92, 0x27,
+	/* formatted parameters, not streamed */
+	0x9c, 0x84, 0x58, 0x80, 0x02, 0x00, 0x07,
 };
 
-/* AC_FXS_RF14_600R_DEF_LE9641 -- streamed from +6, see file header */
-static const u8 ac_mpi[] = {
-	0xa4, 0x00, 0xf4, 0x4c, 0x01, 0x49, 0xca, 0xf5, 0x98, 0xaa, 0x7b, 0xab,
+/* AC_FXS_RF14_600R_DEF_LE9641 */
+static const u8 ac_profile[] = {
+	0xa4, 0x00, 0xf4, 0x4c, 0x01, 0x49,
+	0xca, 0xf5, 0x98, 0xaa, 0x7b, 0xab,
 	0x2c, 0xa3, 0x25, 0xa5, 0x24, 0xb2, 0x3d, 0x9a, 0x2a, 0xaa, 0xa6, 0x9f,
 	0x01, 0x8a, 0x1d, 0x01, 0xa3, 0xa0, 0x2e, 0xb2, 0xb2, 0xba, 0xac, 0xa2,
 	0xa6, 0xcb, 0x3b, 0x45, 0x88, 0x2a, 0x20, 0x3c, 0xbc, 0x4e, 0xa6, 0x2b,
 	0xa5, 0x2b, 0x3e, 0xba, 0x8f, 0x82, 0xa8, 0x71, 0x80, 0xa9, 0xf0, 0x50,
 	0x00, 0x86, 0x2a, 0x42, 0xa1, 0xcb, 0x1b, 0xa3, 0xa8, 0xfb, 0x87, 0xaa,
-	0xfb, 0x9f, 0xa9, 0xf0, 0x96, 0x2e, 0x01, 0x00,
+	0xfb, 0x9f, 0xa9, 0xf0, 0x96, 0x2e, 0x01,
+	/* formatted parameters, not streamed */
+	0x00,
 };
-#define AC_MPI_HDR_LEN	6
 
-static const u8 ring_mpi[] = {	/* RING_ZL880_BB90V_DEF, ~24.9 Hz ~70 Vpk */
+/* RING_ZL880_BB90V_DEF, ~24.9 Hz, ~70 Vpk */
+static const u8 ring_profile[] = {
+	0x0d, 0x04, 0x00, 0x12, 0x01, 0x0c,
 	0xc0, 0x08, 0x00, 0x00, 0x00, 0x44, 0x3a, 0x9d, 0x00, 0x00, 0x00, 0x00,
+	/* formatted parameters, not streamed */
+	0xaa, 0x02, 0x0e, 0x00,
 };
+
+/*
+ * PCLK, in kHz, as programmed by the device profile ("PCLK = 2.048 MHz"
+ * in the vendor source). It sets how many byte timeslots a frame holds,
+ * and therefore what a transmit slot of 0 wraps around to.
+ */
+#define LE9642_PCM_CLK_KHZ	2048
+#define LE9642_MAX_SLOT		(LE9642_PCM_CLK_KHZ / 64 - 1)
 
 struct le9642_line {
 	struct le9642_slic	*slic;
@@ -129,6 +193,8 @@ struct le9642_line {
 	bool			ringing;
 	bool			offhook;
 	unsigned int		ring_tick;
+	unsigned int		ring_on_ticks;
+	unsigned int		ring_period_ticks;
 	unsigned int		hook_streak;
 	bool			hook_pending;
 };
@@ -142,7 +208,8 @@ struct le9642_slic {
 	unsigned int		n_lines;
 	struct le9642_line	line[2];
 	u8			rcn, pcn;
-	bool			alaw;
+	enum en75xx_pcm_codec	codec;
+	bool			zsi_tx_shift;
 };
 
 /*
@@ -156,11 +223,23 @@ module_param(feed_ila, int, 0644);
 MODULE_PARM_DESC(feed_ila, "DC feed loop current limit field (mA = 18 + n)");
 
 /*
- * The SLIC uses different clock-slot offsets for capture and playback,
- * so the 8-bit G.711 code lands in a different byte in each direction.
- * Capture always reads the low byte; playback selects with this.
+ * Wire format. The EcoNet reference integration runs these parts with
+ * the 16-bit linear codec, which is what the PCM engine's 16-bit
+ * timeslots are configured for, so that is the default. The G.711
+ * modes remain available for boards that need them; companding then
+ * happens in the PCM data path and the character device is unaffected.
  */
-static bool tx_msb = true;
+static char *codec = "linear";
+module_param(codec, charp, 0444);
+MODULE_PARM_DESC(codec, "wire codec: linear (default), ulaw or alaw");
+
+/*
+ * Only meaningful in a G.711 mode: it picks which byte of the 16-bit
+ * timeslot carries the playback code. With the transmit slot shifted
+ * correctly for ZSI (see le9642_program_slots) the code lands in the
+ * low byte in both directions, so this should stay off.
+ */
+static bool tx_msb;
 module_param(tx_msb, bool, 0644);
 MODULE_PARM_DESC(tx_msb, "place the playback G.711 code in the slot MSB");
 
@@ -198,10 +277,23 @@ static int le9642_cmd1(struct le9642_slic *slic, u8 ec, u8 opcode, u8 v)
 	return le9642_cmd(slic, ec, opcode, &v, 1);
 }
 
-static int le9642_stream(struct le9642_slic *slic, u8 ec, const char *what,
-			 const u8 *buf, size_t len)
+/*
+ * Stream the raw-MPI section of a VpProfile. The section starts at
+ * VP_PROFILE_DATA_START and its length is in the header, so the
+ * formatted-parameter bytes that follow are never put on the bus.
+ */
+static int le9642_stream_profile(struct le9642_slic *slic, u8 ec,
+				 const char *what, const u8 *profile,
+				 size_t profile_len)
 {
+	size_t mpi_len = profile[VP_PROFILE_MPI_LEN];
 	int ret;
+
+	if (VP_PROFILE_DATA_START + mpi_len > profile_len) {
+		dev_err(slic->dev, "profile '%s' claims %zu MPI bytes of %zu\n",
+			what, mpi_len, profile_len);
+		return -EINVAL;
+	}
 
 	if (ec) {
 		ret = le9642_select_ec(slic, ec);
@@ -209,11 +301,15 @@ static int le9642_stream(struct le9642_slic *slic, u8 ec, const char *what,
 			return ret;
 	}
 
-	ret = en75xx_zsi_write(slic->zsi, buf, len);
+	ret = en75xx_zsi_write(slic->zsi, profile + VP_PROFILE_DATA_START,
+			       mpi_len);
 	if (ret)
 		dev_err(slic->dev, "MPI stream '%s' failed: %d\n", what, ret);
 	return ret;
 }
+
+#define le9642_stream(slic, ec, what, prof) \
+	le9642_stream_profile((slic), (ec), (what), (prof), sizeof(prof))
 
 static int le9642_detect(struct le9642_slic *slic)
 {
@@ -249,17 +345,16 @@ static int le9642_load_device_profile(struct le9642_slic *slic)
 	u8 devmode;
 	int ret;
 
-	ret = le9642_stream(slic, 0, "dev", dev_mpi, sizeof(dev_mpi));
+	ret = le9642_stream(slic, 0, "dev", dev_profile);
 	if (ret)
 		return ret;
-	ret = le9642_stream(slic, 0, "dc", dc_mpi, sizeof(dc_mpi));
+	ret = le9642_stream(slic, 0, "dc", dc_profile);
 	if (ret)
 		return ret;
-	ret = le9642_stream(slic, 0, "ac", ac_mpi + AC_MPI_HDR_LEN,
-			    sizeof(ac_mpi) - AC_MPI_HDR_LEN);
+	ret = le9642_stream(slic, 0, "ac", ac_profile);
 	if (ret)
 		return ret;
-	ret = le9642_stream(slic, 0, "ring", ring_mpi, sizeof(ring_mpi));
+	ret = le9642_stream(slic, 0, "ring", ring_profile);
 	if (ret)
 		return ret;
 
@@ -282,14 +377,13 @@ static int le9642_load_channel_profile(struct le9642_slic *slic, u8 ec)
 {
 	int ret;
 
-	ret = le9642_stream(slic, ec, "dc-ch", dc_mpi, sizeof(dc_mpi));
+	ret = le9642_stream(slic, ec, "dc-ch", dc_profile);
 	if (ret)
 		return ret;
-	ret = le9642_stream(slic, ec, "ac-ch", ac_mpi + AC_MPI_HDR_LEN,
-			    sizeof(ac_mpi) - AC_MPI_HDR_LEN);
+	ret = le9642_stream(slic, ec, "ac-ch", ac_profile);
 	if (ret)
 		return ret;
-	return le9642_stream(slic, ec, "ring-ch", ring_mpi, sizeof(ring_mpi));
+	return le9642_stream(slic, ec, "ring-ch", ring_profile);
 }
 
 /* ------------------------------------------------------------------ */
@@ -298,6 +392,7 @@ static int le9642_load_channel_profile(struct le9642_slic *slic, u8 ec)
 
 static int le9642_set_feed(struct le9642_slic *slic, struct le9642_line *line)
 {
+	const u8 *dc_mpi = dc_profile + VP_PROFILE_DATA_START;
 	u8 dc[2] = { dc_mpi[1], (u8)((dc_mpi[2] & ~0x1f) | (feed_ila & 0x1f)) };
 	int ret;
 
@@ -319,14 +414,61 @@ static int le9642_set_state(struct le9642_slic *slic, struct le9642_line *line,
 }
 
 /*
+ * Program the transmit and receive timeslots.
+ *
+ * ZSI inserts two PCLK cycles of delay on the transmit side. The clock
+ * slot register can only shift forward, so the compensation the vendor
+ * API applies is to shift the whole transmit slot back by one byte
+ * timeslot (-8 clocks) and let the device profile's clock-slot field
+ * add +6 clocks back, netting the -2 that cancels the ZSI delay. Slot 0
+ * has no slot below it and wraps to the last slot in the frame.
+ *
+ * Skipping the shift leaves transmit audio exactly one byte late, which
+ * looks like the playback code landing in the wrong half of a 16-bit
+ * timeslot. An earlier revision papered over that with a tx_msb byte
+ * selector; the shift is the actual fix.
+ */
+static int le9642_program_slots(struct le9642_slic *slic,
+				struct le9642_line *line)
+{
+	unsigned int tx_slot = line->bus_slot;
+	int ret;
+
+	if (slic->zsi_tx_shift)
+		tx_slot = tx_slot ? tx_slot - 1 : LE9642_MAX_SLOT;
+
+	ret = le9642_cmd1(slic, line->ec, VP886_R_TXSLOT_WRT, tx_slot);
+	if (ret)
+		return ret;
+	return le9642_cmd1(slic, line->ec, VP886_R_RXSLOT_WRT, line->bus_slot);
+}
+
+/*
  * Audio line-up. OPFUNC must be written before TXSLOT/RXSLOT -- the
  * OEM does it in that order and out of order the capture is degraded.
  */
 static int le9642_audio_setup(struct le9642_slic *slic,
 			      struct le9642_line *line)
 {
-	u8 opfunc = slic->alaw ? VP886_OPFUNC_ALAW : VP886_OPFUNC_ULAW;
+	static const char * const codec_name[] = {
+		[EN75XX_PCM_CODEC_LINEAR16] = "16-bit linear",
+		[EN75XX_PCM_CODEC_ULAW] = "u-law",
+		[EN75XX_PCM_CODEC_ALAW] = "a-law",
+	};
+	u8 opfunc;
 	int ret;
+
+	switch (slic->codec) {
+	case EN75XX_PCM_CODEC_ALAW:
+		opfunc = VP886_OPFUNC_ALAW;
+		break;
+	case EN75XX_PCM_CODEC_ULAW:
+		opfunc = VP886_OPFUNC_ULAW;
+		break;
+	default:
+		opfunc = VP886_OPFUNC_LINEAR;
+		break;
+	}
 
 	ret = le9642_set_feed(slic, line);
 	if (ret)
@@ -336,10 +478,7 @@ static int le9642_audio_setup(struct le9642_slic *slic,
 	if (ret)
 		return ret;
 
-	ret = le9642_cmd1(slic, line->ec, VP886_R_TXSLOT_WRT, line->bus_slot);
-	if (ret)
-		return ret;
-	ret = le9642_cmd1(slic, line->ec, VP886_R_RXSLOT_WRT, line->bus_slot);
+	ret = le9642_program_slots(slic, line);
 	if (ret)
 		return ret;
 
@@ -348,16 +487,16 @@ static int le9642_audio_setup(struct le9642_slic *slic,
 		return ret;
 
 	if (slic->pcm && slic->pcm->line_ops->set_format) {
-		ret = slic->pcm->line_ops->set_format(slic->pcm, line->pcm_channel,
-			slic->alaw ? EN75XX_PCM_CODEC_ALAW
-				   : EN75XX_PCM_CODEC_ULAW, tx_msb);
+		ret = slic->pcm->line_ops->set_format(slic->pcm,
+						      line->pcm_channel,
+						      slic->codec, tx_msb);
 		if (ret)
 			return ret;
 	}
 
 	dev_dbg(slic->dev, "EC_%u audio up: slot %u, dma ch %u, %s\n",
 		line->ec, line->bus_slot, line->pcm_channel,
-		slic->alaw ? "a-law" : "u-law");
+		codec_name[slic->codec]);
 	return 0;
 }
 
@@ -401,6 +540,20 @@ static int le9642_op_ring(void *priv, bool enable, unsigned int on_ms,
 		goto out;
 
 	if (enable) {
+		unsigned int on_ticks = RING_ON_TICKS_DEFAULT;
+		unsigned int period_ticks = RING_PERIOD_TICKS_DEFAULT;
+
+		/*
+		 * Round the caller's cadence to whole ticks. Anything
+		 * shorter than one tick would give a cadence the worker
+		 * cannot express, so it keeps the default instead of
+		 * silently ringing continuously.
+		 */
+		if (on_ms >= RING_TICK_MS && off_ms >= RING_TICK_MS) {
+			on_ticks = on_ms / RING_TICK_MS;
+			period_ticks = on_ticks + off_ms / RING_TICK_MS;
+		}
+
 		ret = le9642_load_channel_profile(slic, line->ec);
 		if (ret)
 			goto out;
@@ -412,6 +565,8 @@ static int le9642_op_ring(void *priv, bool enable, unsigned int on_ms,
 		if (ret)
 			goto out;
 
+		line->ring_on_ticks = on_ticks;
+		line->ring_period_ticks = period_ticks;
 		line->ring_tick = 0;
 		line->ringing = true;
 		/* the cadence itself is driven from the tick worker */
@@ -479,12 +634,12 @@ static void le9642_tick_line(struct le9642_slic *slic,
 	bool offhook, in_gap;
 
 	if (line->ringing) {
-		unsigned int phase = line->ring_tick % RING_PERIOD_TICKS;
+		unsigned int phase = line->ring_tick % line->ring_period_ticks;
 
-		in_gap = phase >= RING_ON_TICKS;
+		in_gap = phase >= line->ring_on_ticks;
 		if (phase == 0)
 			le9642_set_state(slic, line, VP886_SS_BAL_RING, false);
-		else if (phase == RING_ON_TICKS)
+		else if (phase == line->ring_on_ticks)
 			le9642_set_state(slic, line, VP886_SS_ACTIVE, true);
 
 		line->ring_tick++;
@@ -596,6 +751,12 @@ static int le9642_probe(struct platform_device *pdev)
 	slic->dev = dev;
 	mutex_init(&slic->lock);
 	INIT_DELAYED_WORK(&slic->tick_work, le9642_tick_work);
+	if (!strcmp(codec, "alaw"))
+		slic->codec = EN75XX_PCM_CODEC_ALAW;
+	else if (!strcmp(codec, "ulaw"))
+		slic->codec = EN75XX_PCM_CODEC_ULAW;
+	else
+		slic->codec = EN75XX_PCM_CODEC_LINEAR16;
 
 	slic->zsi = en75xx_zsi_get(dev, "airoha,zsi");
 	if (IS_ERR(slic->zsi))
@@ -614,12 +775,21 @@ static int le9642_probe(struct platform_device *pdev)
 
 	of_property_read_u32(np, "airoha,lines", &n_lines);
 	of_property_read_u32_array(np, "airoha,bus-slots", slots, 2);
-	slic->alaw = of_property_read_bool(np, "airoha,a-law");
+	if (of_property_read_bool(np, "airoha,a-law"))
+		slic->codec = EN75XX_PCM_CODEC_ALAW;
+	/*
+	 * The transmit-slot shift compensates for the delay ZSI adds on
+	 * the transmit side, so it belongs with the transport and not
+	 * with the chip. A board wiring this part over plain SPI/PCM
+	 * turns it off.
+	 */
+	slic->zsi_tx_shift = !of_property_read_bool(np, "airoha,no-zsi-tx-shift");
 	slic->n_lines = clamp_val(n_lines, 1, 2);
 	for (i = 0; i < slic->n_lines; i++) {
-		if (slots[i] < 4 || slots[i] >= 4 + EN75XX_PCM_MAX_CHANNELS) {
+		if (slots[i] > LE9642_MAX_SLOT) {
 			ret = dev_err_probe(dev, -EINVAL,
-				"invalid PCM bus slot %u for line %u\n", slots[i], i);
+				"PCM bus slot %u for line %u is past the end of the frame\n",
+				slots[i], i);
 			goto err_pcm;
 		}
 		if (i && slots[i] == slots[0]) {
@@ -631,11 +801,27 @@ static int le9642_probe(struct platform_device *pdev)
 
 	for (i = 0; i < slic->n_lines; i++) {
 		struct le9642_line *line = &slic->line[i];
+		int channel;
+
+		/*
+		 * Ask the PCM engine which DMA channel carries this bus
+		 * slot rather than assuming a fixed relationship: the two
+		 * are tied together only by the engine's timeslot table.
+		 */
+		channel = en75xx_pcm_channel_for_slot(slic->pcm, slots[i]);
+		if (channel < 0) {
+			ret = dev_err_probe(dev, channel,
+				"no PCM channel is configured for bus slot %u\n",
+				slots[i]);
+			goto err_pcm;
+		}
 
 		line->slic = slic;
 		line->ec = i + 1;
 		line->bus_slot = slots[i];
-		line->pcm_channel = EN75XX_PCM_SLOT_TO_DMA_CH(slots[i]);
+		line->pcm_channel = channel;
+		line->ring_on_ticks = RING_ON_TICKS_DEFAULT;
+		line->ring_period_ticks = RING_PERIOD_TICKS_DEFAULT;
 	}
 
 	ret = le9642_bringup(slic);
@@ -661,6 +847,10 @@ static int le9642_probe(struct platform_device *pdev)
 	schedule_delayed_work(&slic->tick_work, msecs_to_jiffies(RING_TICK_MS));
 
 	dev_info(dev, "%u FXS line(s) ready\n", slic->n_lines);
+	for (i = 0; i < slic->n_lines; i++)
+		dev_info(dev, "  line %u: EC_%u, bus slot %u, PCM channel %u\n",
+			 i, slic->line[i].ec, slic->line[i].bus_slot,
+			 slic->line[i].pcm_channel);
 	return 0;
 
 err_lines:

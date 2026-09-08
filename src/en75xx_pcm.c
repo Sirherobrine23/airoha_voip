@@ -79,8 +79,8 @@ struct en75xx_pcm_dev {
 	dma_addr_t tx_buf_dma;
 	dma_addr_t rx_buf_dma;
 	struct en75xx_pcm_chan chan[EN75XX_PCM_MAX_CHANNELS];
-	u32 tx_slots[4];
-	u32 rx_slots[4];
+	u32 tx_slots[EN75XX_PCM_SLOT_REGS];
+	u32 rx_slots[EN75XX_PCM_SLOT_REGS];
 	u32 iface_ctrl;
 	u8 dma_channel_mask;
 	u8 active_mask;
@@ -360,7 +360,7 @@ static int en75xx_pcm_hw_start(struct en75xx_pcm_dev *pcm)
 	if (ret)
 		return ret;
 
-	for (i = 0; i < 4; i++) {
+	for (i = 0; i < EN75XX_PCM_SLOT_REGS; i++) {
 		pcm_write(pcm, EN75XX_PCM_TX_SLOT0 + i * 4, pcm->tx_slots[i]);
 		pcm_write(pcm, EN75XX_PCM_RX_SLOT0 + i * 4, pcm->rx_slots[i]);
 	}
@@ -374,11 +374,13 @@ static int en75xx_pcm_hw_start(struct en75xx_pcm_dev *pcm)
 	pcm_write(pcm, EN75XX_PCM_RX_DESC_BASE,
 		en75xx_pcm_dma_addr(pcm, pcm->rx_ring_dma));
 	pcm_write(pcm, EN75XX_PCM_RING_CFG, pcm->soc->ring_cfg);
-	if (pcm->soc->pcm_v2) {
-		pcm_write(pcm, EN7523_PCM_V2_CFG, 0xa0);
-		pcm_write(pcm, EN7523_PCM_CHAN_ENABLE,
+	/*
+	 * The vendor regMap has no register at 0xa8; an earlier revision
+	 * wrote one there. 0xac is real: writable mask 0xf, reset 0xf.
+	 */
+	if (pcm->soc->pcm_v2)
+		pcm_write(pcm, EN75XX_PCM_CHAN_ENABLE,
 			  pcm->dma_channel_mask & pcm->soc->channel_mask);
-	}
 
 	for (index = 0; index < pcm->soc->ring_count; index++) {
 		en75xx_pcm_fill_tx_desc(pcm, index);
@@ -671,6 +673,82 @@ void en75xx_pcm_unregister(struct en75xx_pcm *pcm)
 }
 EXPORT_SYMBOL_GPL(en75xx_pcm_unregister);
 
+/*
+ * Where in the 8 kHz frame a DMA channel's audio sits, as a bit offset.
+ *
+ * The timeslot-configuration registers pack two channels per word, and
+ * their slot field is a bit offset into the frame rather than a byte
+ * timeslot index (see en75xx_pcm_regs.h). Everything that has to line a
+ * SLIC up with the DMA engine needs this number, so it is derived from
+ * the table the engine was actually programmed with rather than from a
+ * formula that could drift away from it.
+ */
+int en75xx_pcm_channel_bit_offset(struct en75xx_pcm *pub, unsigned int channel)
+{
+	struct en75xx_pcm_dev *pcm = to_pcm_dev(pub);
+	u32 cfg;
+
+	if (channel >= EN75XX_PCM_MAX_CHANNELS)
+		return -EINVAL;
+
+	cfg = pcm->rx_slots[channel / 2];
+	return (channel & 1) ? FIELD_GET(EN75XX_PCM_TS_HI_NUM, cfg)
+			     : FIELD_GET(EN75XX_PCM_TS_LO_NUM, cfg);
+}
+EXPORT_SYMBOL_GPL(en75xx_pcm_channel_bit_offset);
+
+/*
+ * Resolve a PCM *bus* timeslot to the DMA channel that carries it.
+ *
+ * A SLIC is told a bus timeslot; the DMA engine numbers channels. The
+ * two are related only by the timeslot table, so the mapping is whatever
+ * that table says and cannot be expressed as a fixed formula. An earlier
+ * revision used "slot - 4", which disagreed with this driver's own
+ * default table: that table puts channel n at bit offset 32 + n * 16,
+ * i.e. at byte timeslot 4 + n * 2, so bus slot 6 is channel 1 and not
+ * channel 2. Getting it wrong does not fail; the line just never
+ * receives audio.
+ *
+ * Returns the channel, or -ENOENT when no configured channel covers the
+ * slot. TX and RX are checked separately because a board may legitimately
+ * program them differently, and a mismatch is worth reporting.
+ */
+int en75xx_pcm_channel_for_slot(struct en75xx_pcm *pub, unsigned int bus_slot)
+{
+	struct en75xx_pcm_dev *pcm = to_pcm_dev(pub);
+	u32 want = EN75XX_PCM_SLOT_TO_BIT(bus_slot);
+	unsigned int channel;
+	int rx_match = -ENOENT;
+	int tx_match = -ENOENT;
+
+	if (want > FIELD_MAX(EN75XX_PCM_TS_LO_NUM))
+		return -EINVAL;
+
+	for (channel = 0; channel < EN75XX_PCM_MAX_CHANNELS; channel++) {
+		u32 tx = pcm->tx_slots[channel / 2];
+		u32 tx_num;
+		int rx_num;
+
+		rx_num = en75xx_pcm_channel_bit_offset(pub, channel);
+		tx_num = (channel & 1) ? FIELD_GET(EN75XX_PCM_TS_HI_NUM, tx)
+				       : FIELD_GET(EN75XX_PCM_TS_LO_NUM, tx);
+
+		if (rx_match < 0 && rx_num == (int)want)
+			rx_match = channel;
+		if (tx_match < 0 && tx_num == want)
+			tx_match = channel;
+	}
+
+	if (rx_match < 0)
+		return -ENOENT;
+	if (tx_match != rx_match)
+		dev_warn(pcm->dev,
+			 "bus slot %u is RX channel %d but TX channel %d\n",
+			 bus_slot, rx_match, tx_match);
+	return rx_match;
+}
+EXPORT_SYMBOL_GPL(en75xx_pcm_channel_for_slot);
+
 struct en75xx_pcm *en75xx_pcm_get_by_fwnode(struct fwnode_handle *fwnode)
 {
 	struct en75xx_pcm_dev *pcm;
@@ -698,7 +776,7 @@ EXPORT_SYMBOL_GPL(en75xx_pcm_put);
 
 static int en75xx_pcm_probe(struct platform_device *pdev)
 {
-	static const u32 default_slots[4] = {
+	static const u32 default_slots[EN75XX_PCM_SLOT_REGS] = {
 		0x10301020, 0x10501040, 0x10701060, 0x10901080,
 	};
 	struct device *dev = &pdev->dev;
@@ -748,9 +826,11 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 	}
 	pcm->dma_channel_mask = channel_mask;
 	device_property_read_u32_array(dev, "airoha,tx-slot-config",
-				       pcm->tx_slots, 4);
+				       pcm->tx_slots,
+				       EN75XX_PCM_SLOT_REGS);
 	device_property_read_u32_array(dev, "airoha,rx-slot-config",
-				       pcm->rx_slots, 4);
+				       pcm->rx_slots,
+				       EN75XX_PCM_SLOT_REGS);
 	pcm->big_endian_samples = device_property_read_bool(dev,
 						    "airoha,pcm-big-endian");
 

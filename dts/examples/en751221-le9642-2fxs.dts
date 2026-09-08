@@ -20,7 +20,7 @@
 };
 
 &pcm0 {
-	airoha,dma-channel-mask = <0x05>;
+	airoha,dma-channel-mask = <0x03>;
 	status = "okay";
 };
 
@@ -36,15 +36,17 @@
 		airoha,lines = <2>;
 
 		/*
-		 * PCM *bus* timeslots, not DMA channels. The RX DMA lands
-		 * a slot's audio on channel (slot - 4), so 4 -> ch0 and
-		 * 6 -> ch2. Two lines must not share a slot; giving both
-		 * slot 4 makes the second line silent rather than
-		 * failing to probe.
+		 * PCM *bus* timeslots, not DMA channels. The two are
+		 * related only by the engine's timeslot table: with the
+		 * default table channel n sits at bit offset 32 + n * 16,
+		 * i.e. at bus slot 4 + n * 2, so slots 4 and 6 are DMA
+		 * channels 0 and 1. The driver resolves this at probe and
+		 * refuses a slot no channel covers, so a mistake here is
+		 * a probe failure rather than a silent line.
 		 */
 		airoha,bus-slots = <4 6>;
 
-		/* u-law is the default; uncomment for a-law regions */
+		/* 16-bit linear is the default; uncomment for a-law regions */
 		/* airoha,a-law; */
 
 		status = "okay";

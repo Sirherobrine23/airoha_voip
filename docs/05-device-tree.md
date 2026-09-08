@@ -176,13 +176,26 @@ Le9642, child of the ZSI node:
 | `airoha,pcm`       | phandle to the PCM instance                                |
 | `airoha,lines`     | 1 or 2                                                     |
 | `airoha,bus-slots` | one PCM **bus** timeslot per line                          |
-| `airoha,a-law`     | u-law is the default                                       |
+| `airoha,a-law`     | 16-bit linear is the default; see below                    |
+| `airoha,no-zsi-tx-shift` | only for a board wiring this part over plain SPI/PCM |
+
+The wire codec defaults to 16-bit linear, which is what the vendor
+integration uses and what the PCM engine's 16-bit timeslots expect. Set
+`airoha,a-law`, or the module parameter `codec=ulaw`, to run G.711
+instead; the driver then compands in the PCM data path and the character
+device is unchanged either way.
+
+`airoha,no-zsi-tx-shift` turns off the one-slot transmit shift that
+compensates for the two PCLK cycles ZSI adds on transmit. It exists only
+for a board that does not use ZSI. On a ZSI board, leaving the shift out
+puts transmit audio one byte late — see `docs/07`.
 
 ProSLIC, child of an SPI controller:
 
 | property               | notes                                  |
 | ---------------------- | -------------------------------------- |
 | `compatible`           | `silabs,si32192`, `silabs,si3219x`     |
+| interface              | SPI only; Airoha lists the Si32192 as ISI, see `docs/07` |
 | `spi-cpha`, `spi-cpol` | mode 3; the driver asks for it anyway  |
 | `spi-max-frequency`    | 10 MHz, per MediaTek's own integration |
 | `airoha,pcm`           | phandle to the PCM instance            |
@@ -196,15 +209,22 @@ disturb audio — see `docs/06`.
 ## The slot-versus-channel trap
 
 `airoha,bus-slots` takes PCM **bus** timeslots. `airoha,pcm-channel`
-takes a **DMA channel**. They are not the same number: the RX DMA lands
-a slot's audio on channel `slot - 4`, so bus slot 4 is DMA channel 0 and
-bus slot 6 is DMA channel 2.
+takes a **DMA channel**. They are not the same number, and the relation
+between them is not a constant of the hardware: it is whatever
+`airoha,tx-slot-config` and `airoha,rx-slot-config` were programmed to
+say. The slot field in those words is a bit offset into the 8 kHz frame,
+so byte timeslot *s* is the channel whose configured offset is *s*·8.
 
-The Le9642 driver now rejects slots below 4, slots outside the eight
-known DMA channels, and duplicate slots. The PCM driver separately
-rejects a line whose DMA channel is outside `airoha,dma-channel-mask` or
-the SoC limit. This turns the old silent-line failure into a probe/open
-error with a useful message.
+With the default table channel *n* sits at bit offset 32 + *n*·16, i.e.
+at bus slot 4 + *n*·2. Bus slots 4 and 6 are therefore DMA channels 0
+and 1, and a two-line board wants `airoha,dma-channel-mask = <0x03>`.
+
+An earlier revision used `channel = slot - 4` here, which contradicted
+that table and left the second line on a channel the mask never enabled.
+The SLIC drivers now ask the PCM driver to resolve a slot instead of
+computing it, and a slot no channel covers fails the probe with a
+message. The PCM driver separately rejects a line whose DMA channel is
+outside `airoha,dma-channel-mask` or the SoC limit.
 
 The configured DMA mask stays constant while the engine runs. Opening
 or closing an additional FXS line only changes which FIFO is consumed;

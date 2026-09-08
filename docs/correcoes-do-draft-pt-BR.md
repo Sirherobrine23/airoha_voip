@@ -33,6 +33,31 @@ informação abaixo é classificada como:
 | Robustez ZSI       | erros de regmap/populate eram ignorados; lookup tinha race                          | erros são propagados, lista é revertida no erro e a referência do device é obtida sob lock              |
 | Timeslots Le9642   | slots duplicados ou inválidos viravam linha muda                                    | probe rejeita slot menor que 4, fora do range ou duplicado                                              |
 
+
+## Segunda revisão: comparação com o SDK LTS da Airoha
+
+As correções acima vieram da descompilação dos binários do fabricante.
+Uma revisão posterior refez a mesma verificação contra o código C da
+própria Airoha, publicado no GPL drop do TP-Link VB430, e contra o
+`pcm1.ko` não removido de símbolos que acompanha o pacote. As evidências
+estão em `docs/07-gpl-sdk-crosscheck.md`; as mudanças são:
+
+| Área | Problema | Correção |
+| ---- | -------- | -------- |
+| Registrador PCM 0xa8 | a inicialização do EN7523 escrevia `0xa0` num registrador inexistente | escrita removida; o `regMap` do fabricante não tem nada entre 0x40 e 0xac |
+| Máscara de interrupção | `INT_HOOK` (bits 11..16) e a "máscara OEM 0x5828" ligam bits que o bloco não implementa | removidos; `ISR` e `INTMask` têm máscara gravável de `0x7ff` |
+| Campo de timeslot | lido como índice de slot de byte | é um deslocamento em bits dentro do quadro; o canal *n* reseta para o deslocamento *n*·8 |
+| Slot para canal | `canal = slot - 4`, em contradição com a própria tabela de slots do driver | `en75xx_pcm_channel_for_slot()` percorre a tabela configurada; um slot sem correspondência falha no probe |
+| Slot de transmissão do Le9642 | igual ao slot de recepção | o ZSI acrescenta dois PCLK de atraso na transmissão; o slot de TX agora fica um abaixo do slot de barramento, como faz a API da Microchip |
+| Codec do Le9642 | u-law mais o seletor de byte `tx_msb`, contornando a falta do deslocamento | passa a usar linear de 16 bits por padrão, como o fabricante; G.711 continua selecionável |
+| Perfil de dispositivo do Le9642 | operando `CLKSLOTS` `0x06` | `0x46`, o valor que o fabricante aplica em toda placa ZSI |
+| Perfil AC do Le9642 | enviava `sizeof - 6` = 74 bytes | envia os 73 declarados no cabeçalho do perfil; o 74º era lido como opcode |
+| Toque do Le9642 | ignorava a cadência pedida | arredonda a cadência pedida para ticks inteiros |
+| Timeslot do ProSLIC | `canal * 16` | o deslocamento em bits que o motor PCM atribuiu àquele canal |
+| Init do ProSLIC | sem calibração LB e sem os ajustes de formato PCM, borda de clock e interrupção | os quatro foram acrescentados, seguindo a integração do fabricante |
+| Interface do Si32192 | documentado como peça SPI comum | a Airoha o lista como ISI; o cabeçalho do arquivo agora diz isso |
+| IRQ do PCM no EN7523 | "candidato do fabricante" | confirmado: `GIC_SPI 27`, nível alto, na device tree do SDK |
+
 ## Layout PCM mantido pelo driver
 
 | Item                 | EN751221 / EN7528                  | EN7523                        |
@@ -100,6 +125,21 @@ x86_64 preparada com `modules_prepare`; ela não substitui o cross-build
 ARM/MIPS. Sem o `Module.symvers` completo do kernel, o `modpost` reporta
 símbolos do próprio kernel como não resolvidos. O canal Asterisk ainda
 precisa ser compilado contra os headers da versão exata usada no firmware.
+
+A revisão de comparação com o SDK repetiu a compilação contra um tarball
+oficial do `linux-6.18.50`, dessa vez com `vmlinux` completo, de modo que
+o `Module.symvers` fica completo e o `modpost` resolve todos os símbolos.
+Os cinco módulos compilam sem nenhum warning com `W=1` e linkam sem
+símbolo indefinido, incluindo os símbolos entre módulos. Os quatro perfis
+do Le9642 também foram comparados byte a byte com o código do fabricante,
+e o comprimento declarado e o comprimento da seção MPI de cada um batem
+com o conteúdo.
+
+Duas ressalvas sobre essa execução. Ela continua sendo x86_64, então não
+exercita os caminhos big-endian do MIPS. E os exemplos de device tree do
+EN7523 não compilam contra uma árvore 6.18 oficial, porque o fragmento
+espera um label `pinctrl` que o `en7523.dtsi` upstream ainda não tem;
+isso não mudou em relação à revisão anterior.
 
 ## Pendências antes de uso real
 

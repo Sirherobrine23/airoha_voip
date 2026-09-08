@@ -68,6 +68,17 @@ struct en75xx_pcm {
 };
 
 struct en75xx_pcm *en75xx_pcm_get_by_fwnode(struct fwnode_handle *fwnode);
+/*
+ * Map a PCM bus timeslot to the DMA channel carrying it, using the
+ * timeslot table the PCM engine was actually programmed with. Returns
+ * -ENOENT when no configured channel covers the slot.
+ */
+int en75xx_pcm_channel_for_slot(struct en75xx_pcm *pcm, unsigned int bus_slot);
+/*
+ * Where a DMA channel's audio sits in the frame, as a bit offset. This
+ * is the number a SLIC's own PCM timeslot registers want.
+ */
+int en75xx_pcm_channel_bit_offset(struct en75xx_pcm *pcm, unsigned int channel);
 void en75xx_pcm_put(struct en75xx_pcm *pcm);
 int en75xx_pcm_register(struct en75xx_pcm *pcm);
 void en75xx_pcm_unregister(struct en75xx_pcm *pcm);

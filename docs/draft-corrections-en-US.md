@@ -33,6 +33,30 @@ support. Findings below are classified as:
 | ZSI robustness   | regmap/populate errors were ignored and lookup raced removal                 | errors propagate, list insertion is rolled back, and the device reference is taken under the list lock |
 | Le9642 slots     | invalid/duplicate slots produced a silent line                               | probe rejects slots below 4, outside the known range, or duplicated                                    |
 
+## Second revision: cross-check against the Airoha LTS SDK
+
+The corrections above came from decompiling vendor binaries. A later
+revision re-checked the same ground against Airoha's own C sources,
+published as part of the TP-Link VB430 GPL drop, and against the
+unstripped `pcm1.ko` it ships. `docs/07-gpl-sdk-crosscheck.md` has the
+evidence; the changes are:
+
+| Area | Problem | Correction |
+| ---- | ------- | ---------- |
+| PCM register 0xa8 | EN7523 start-up wrote `0xa0` to a register that does not exist | write removed; the vendor `regMap` has nothing between 0x40 and 0xac |
+| Interrupt mask | `INT_HOOK` (bits 11..16) and the "OEM mask 0x5828" set bits the block does not implement | removed; `ISR` and `INTMask` have a writable mask of `0x7ff` |
+| Timeslot field | read as a byte-slot index | it is a bit offset into the frame; channel *n* resets to offset *n*·8 |
+| Slot to channel | `channel = slot - 4`, contradicting this driver's own default slot table | `en75xx_pcm_channel_for_slot()` searches the configured table; an unmatched slot fails the probe |
+| Le9642 transmit slot | programmed equal to the receive slot | ZSI adds two PCLK of transmit delay; the transmit slot is now one below the bus slot, as the Microchip API does |
+| Le9642 codec | u-law plus a `tx_msb` byte selector, working around the missing slot shift | defaults to 16-bit linear, matching the vendor; G.711 stays selectable |
+| Le9642 device profile | `CLKSLOTS` operand `0x06` | `0x46`, the value the vendor patches in for every ZSI board |
+| Le9642 AC profile | streamed `sizeof - 6` = 74 bytes | streams the 73 the profile header declares; the 74th was read as an opcode |
+| Le9642 ring | ignored the caller's cadence | rounds the requested cadence to whole ticks |
+| ProSLIC timeslot | `channel * 16` | the frame bit offset the PCM engine assigned to that channel |
+| ProSLIC init | no LB calibration, no PCM format, edge or interrupt fix-ups | all four added, matching the vendor integration |
+| Si32192 interface | documented as an ordinary SPI part | Airoha lists it as ISI; the file header now says so |
+| EN7523 PCM IRQ | "a vendor candidate" | confirmed: `GIC_SPI 27`, level high, in the SDK device tree |
+
 ## PCM layout implemented by the driver
 
 | Item                 | EN751221 / EN7528                 | EN7523                      |
@@ -99,6 +123,20 @@ configuration; it does not replace the ARM/MIPS cross-build. Without the
 kernel's complete `Module.symvers`, `modpost` reports the kernel's own
 symbols as unresolved. The Asterisk channel still must be built against
 the exact Asterisk headers shipped in the target firmware.
+
+The SDK cross-check revision repeated the build against a stock
+`linux-6.18.50` release tarball, this time with a full `vmlinux` so that
+`Module.symvers` is complete and `modpost` resolves every symbol. All
+five modules build with no warning under `W=1` and link with nothing
+undefined, the inter-module symbols included. The four Le9642 profiles
+were also compared byte for byte against the vendor sources, and each
+one's declared length and raw-MPI length agree with its contents.
+
+Two caveats on that run. It is still x86_64, so it does not exercise the
+big-endian MIPS paths. And the EN7523 device-tree examples do not build
+against a stock 6.18 tree, because the fragment expects a `pinctrl`
+label the upstream `en7523.dtsi` does not yet carry; this is unchanged
+from the previous revision.
 
 ## Required work before deployment
 

@@ -5,7 +5,22 @@
  * The electrical initialization and DSP patch are handled by the ProSLIC API.
  * This file only supplies the Linux SPI/reset services and connects one FXS
  * channel to the common EN75xx PCM/userspace interface.
+ *
+ * Interface note. Airoha's own SLIC support matrix lists the Si32192 and
+ * Si32193 as ISI parts -- ISI multiplexes the ProSLIC control channel over
+ * the PCM bus the same way ZSI does for the Microchip parts -- while the
+ * Si32184/Si32185 and Si3228x are the ones it drives over plain SPI. This
+ * driver is the SPI path. It is correct for a board that wires a four-wire
+ * SPI bus to the ProSLIC, and it is the wrong driver for a board strapped
+ * for ISI; such a board needs an ISI transport in front of it, in the shape
+ * of en75xx_zsi.c.
+ *
+ * Three register fix-ups below come from the EcoNet mod-slic3 ProSLIC
+ * integration in the TP-Link VB430 GPL drop and are applied after
+ * ProSLIC_Init(), because the API's presets do not cover them:
+ * the PCM format field, the transmit clock edge, and the interrupt mask.
  */
+#include <linux/bits.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
@@ -34,6 +49,21 @@
 #define SI3219X_BCAST		0xff
 #define SI3219X_RAM_HIGH(addr)	(((addr) >> 3) & 0xe0)
 #define SI3219X_RAM_WAIT_TRIES	100
+
+/*
+ * Post-init register fix-ups, from the vendor integration.
+ *
+ * PCMMODE bits 1:0 are PCM_FMT; 0x3 selects 16-bit linear, matching the
+ * PCM engine's 16-bit timeslots. PCMTXHI bit 4 selects the clock edge on
+ * which DTX is driven, and it must be clear so the ProSLIC drives on the
+ * rising edge of PCLK. IRQEN2 bit 1 is the loop-status (hook) interrupt;
+ * the rest stay masked so the chip does not assert on events nothing
+ * here consumes.
+ */
+#define SI3219X_PCM_FMT_MASK	0x03
+#define SI3219X_PCM_FMT_LINEAR	0x03
+#define SI3219X_PCM_TX_EDGE	BIT(4)
+#define SI3219X_IRQEN2_HOOK	BIT(1)
 
 /*
  * BOM variant of the DC-DC converter on the board. It selects which
@@ -312,8 +342,31 @@ static void en75xx_si3219x_hook_work(struct work_struct *work)
 	mod_delayed_work(system_wq, &slic->hook_work, msecs_to_jiffies(20));
 }
 
+/*
+ * Register fix-ups the ProSLIC presets do not cover. Applied after
+ * ProSLIC_PCMStart() so nothing in the API path overwrites them.
+ */
+static void si3219x_apply_pcm_fixups(struct en75xx_si3219x *slic)
+{
+	u8 val;
+
+	val = si3219x_read_reg(slic, 0, PROSLIC_REG_PCMMODE);
+	val = (val & ~SI3219X_PCM_FMT_MASK) | SI3219X_PCM_FMT_LINEAR;
+	si3219x_write_reg(slic, 0, PROSLIC_REG_PCMMODE, val);
+
+	/* drive DTX on the rising edge of PCLK */
+	val = si3219x_read_reg(slic, 0, PROSLIC_REG_PCMTXHI);
+	si3219x_write_reg(slic, 0, PROSLIC_REG_PCMTXHI,
+			  val & ~SI3219X_PCM_TX_EDGE);
+
+	si3219x_write_reg(slic, 0, PROSLIC_REG_IRQEN1, 0);
+	si3219x_write_reg(slic, 0, PROSLIC_REG_IRQEN2, SI3219X_IRQEN2_HOOK);
+	si3219x_write_reg(slic, 0, PROSLIC_REG_IRQEN3, 0);
+}
+
 static int en75xx_si3219x_api_init(struct en75xx_si3219x *slic)
 {
+	unsigned int slot;
 	int ret;
 
 	si3219x_control_init(slic);
@@ -352,19 +405,52 @@ static int en75xx_si3219x_api_init(struct en75xx_si3219x *slic)
 		goto err;
 	}
 
+	/*
+	 * Longitudinal balance calibration. The vendor runs it right after
+	 * ProSLIC_Init(), once all the batteries are up. Without it the
+	 * line keeps the factory-default balance coefficients and common
+	 * mode rejection on a long loop is poor.
+	 */
+	if (ProSLIC_LBCal(slic->channel_ptrs, 1) != RC_NONE)
+		dev_warn(&slic->spi->dev,
+			 "longitudinal balance calibration failed\n");
+
+	/*
+	 * ProSLIC_PCMTimeSlotSetup() counts PCLK cycles from the frame
+	 * sync, so it wants the same bit offset the PCM engine assigned
+	 * to this channel. Deriving it from the engine's timeslot table
+	 * keeps the two ends in step; computing it as channel * 16 only
+	 * happens to agree when the table starts at offset 0, which the
+	 * default one does not.
+	 */
+	ret = en75xx_pcm_channel_bit_offset(slic->pcm, slic->pcm_channel);
+	if (ret < 0) {
+		dev_err(&slic->spi->dev,
+			"PCM channel %u has no timeslot configured\n",
+			slic->pcm_channel);
+		goto err_fw;
+	}
+	slot = ret;
+
 	if (ProSLIC_DCFeedSetup(slic->channel, DCFEED_48V_20MA) != RC_NONE ||
 	    ProSLIC_ZsynthSetup(slic->channel, ZSYN_600_0_0_30_0) != RC_NONE ||
 	    ProSLIC_RingSetup(slic->channel, DEFAULT_RINGING) != RC_NONE ||
 	    ProSLIC_PCMSetup(slic->channel, PCM_16LIN) != RC_NONE ||
-	    ProSLIC_PCMTimeSlotSetup(slic->channel, slic->pcm_channel * 16,
-				     slic->pcm_channel * 16) != RC_NONE ||
+	    ProSLIC_PCMTimeSlotSetup(slic->channel, slot, slot) != RC_NONE ||
 	    ProSLIC_SetLinefeedStatus(slic->channel, LF_FWD_ACTIVE) != RC_NONE ||
 	    ProSLIC_PCMStart(slic->channel) != RC_NONE) {
 		ret = -EIO;
-		goto err;
+		goto err_fw;
 	}
+
+	dev_dbg(&slic->spi->dev, "PCM channel %u at frame bit offset %u\n",
+		slic->pcm_channel, slot);
+
+	si3219x_apply_pcm_fixups(slic);
 	return 0;
 
+err_fw:
+	en75xx_proslic_fw_free(&slic->fw);
 err:
 	SiVoice_destroyChannels(&slic->channel);
 	SiVoice_destroyDevices(&slic->device);
