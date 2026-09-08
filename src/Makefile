@@ -8,17 +8,20 @@
 #   en75xx-pcm     the TDM/DMA engine; everything else is a client
 #   en75xx-voice   /dev/en75xx-fxsN and the line registry
 #   en75xx-zsi     ZSI transport (Le9642 and friends)
+#   en75xx-isi-spi ISI transport, exposed as a spi_controller (ProSLIC)
 #   en75xx-slic-*  one per SLIC family
 
 obj-m += en75xx-pcm.o
 obj-m += en75xx-voice.o
 obj-m += en75xx-zsi.o
+obj-m += en75xx-isi-spi.o
 obj-m += en75xx-slic-le9642.o
 obj-m += en75xx-slic-si3219x.o
 
 en75xx-pcm-objs            := en75xx_pcm.o
 en75xx-voice-objs          := en75xx_voice_core.o
 en75xx-zsi-objs            := en75xx_zsi.o
+en75xx-isi-spi-objs        := en75xx_isi_spi.o
 en75xx-slic-le9642-objs    := en75xx_slic_le9642.o
 
 # The ProSLIC driver links the Skyworks API sources from vendor/.

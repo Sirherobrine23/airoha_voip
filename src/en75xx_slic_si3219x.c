@@ -10,10 +10,11 @@
  * Si32193 as ISI parts -- ISI multiplexes the ProSLIC control channel over
  * the PCM bus the same way ZSI does for the Microchip parts -- while the
  * Si32184/Si32185 and Si3228x are the ones it drives over plain SPI. This
- * adapter currently implements SPI transactions only. No supported SPI mode
- * for Si32192/Si32193 has been established by the available documentation.
- * Their known compatibles are refused before reset or bus configuration;
- * implementing ISI is required before enabling those board nodes.
+ * file only ever issues ordinary spi_write()/spi_write_then_read() calls,
+ * so it does not care which kind of bus it ends up on: a Si32192/Si32193
+ * board wires its DT node under an en75xx-isi-spi controller (which frames
+ * these same transactions as ISI underneath), and a Si32184/Si3228x board
+ * under a real SPI controller. See en75xx_isi_spi.c.
  *
  * Three register fix-ups below come from the EcoNet mod-slic3 ProSLIC
  * integration in the TP-Link VB430 GPL drop and are applied after
@@ -496,11 +497,6 @@ static int en75xx_si3219x_probe(struct spi_device *spi)
 	struct en75xx_si3219x *slic;
 	struct device_node *pcm_np;
 	int ret, hook;
-
-	if (of_device_is_compatible(spi->dev.of_node, "silabs,si32192") ||
-	    of_device_is_compatible(spi->dev.of_node, "silabs,si32193"))
-		return dev_err_probe(&spi->dev, -EOPNOTSUPP,
-			"Si32192/Si32193 require an ISI transport; SPI is not implemented for these parts\n");
 
 	/* A different patch does not change the compiled converter topology. */
 	if (strcasecmp(bom, "lcqc"))

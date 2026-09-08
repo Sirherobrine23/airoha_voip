@@ -172,4 +172,34 @@
 		airoha,zsi-gap-us = <5000>;
 		status = "disabled";
 	};
+
+	/*
+	 * ISI. Same wrapper as zsi0 above, same pins, same reset line --
+	 * ISI and ZSI are alternate framings of one physical block, so a
+	 * board enables at most one of these two nodes, never both.
+	 *
+	 * Unlike zsi0, this needs the raw SCU phandles: SYS SCU 0x94
+	 * (interface mode) and chip SCU 0x214/0x1d0/0x264 (clock source,
+	 * pin routing, audio PLL) are not modelled as clock/reset
+	 * providers upstream, so en75xx_isi_spi.c reaches them directly.
+	 * See its file header for the audio PLL requirement, EN7523-only.
+	 */
+	isi0: spi@1fbd1000 {
+		compatible = "airoha,en7523-isi-spi";
+		reg = <0x1fbd1000 0x1000>;
+		reg-names = "isi";
+		resets = <&scuclk EN7523_PCM1_ZSI_ISI_RST>;
+		reset-names = "isi";
+		clocks = <&scuclk EN7523_CLK_SLIC>;
+		clock-names = "slic";
+		airoha,scu = <&scuclk>;
+		airoha,chip-scu = <&chip_scu>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcm_spi_pins>, <&pcm_spi_cs1_pins>;
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "disabled";
+	};
 };

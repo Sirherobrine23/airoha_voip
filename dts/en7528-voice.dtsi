@@ -137,5 +137,32 @@
 			airoha,zsi-gap-us = <5000>;
 			status = "disabled";
 		};
+
+		/*
+		 * ISI. Same wrapper as zsi0, same pins, same reset line.
+		 * en75xx_isi_spi.c does not yet route the chip-SCU clock
+		 * source/pinmux for this SoC (that entry's layout was never
+		 * decoded -- see en75xx_isi_quirks::has_chip_scu_route in
+		 * that file) and warns at probe instead of guessing; both
+		 * phandles are still required so no DT change is needed once
+		 * it is. No audio PLL block exists on this SoC.
+		 */
+		isi0: spi@1fbd1000 {
+			compatible = "econet,en7528-isi-spi";
+			reg = <0x1fbd1000 0x1000>;
+			reg-names = "isi";
+
+			resets = <&scuclk EN7528_PCM1_ZSI_ISI_RST>;
+			reset-names = "isi";
+			airoha,scu = <&scuclk>;
+			airoha,chip-scu = <&chip_scu>;
+
+			pinctrl-names = "default";
+			pinctrl-0 = <&pcm_spi_pins>, <&pcm_spi_cs1_pins>;
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
 	};
 };

@@ -25,22 +25,28 @@
 
 &pcm0 {
 	/*
-	 * A ProSLIC talks over the real SPI controller, so the PCM pins
-	 * carry audio only: pcm1_pins, not pcm_spi_pins.
+	 * ISI multiplexes the SLIC control channel onto the PCM pins
+	 * themselves (see isi0 below), so this is pcm_spi_pins, not
+	 * pcm1_pins -- the same pin group zsi0 would need if this board
+	 * used a ZSI part instead.
 	 */
 	pinctrl-names = "default";
-	pinctrl-0 = <&pcm1_pins>;
+	pinctrl-0 = <&pcm_spi_pins>;
 	airoha,dma-channel-mask = <0x05>;
 	status = "okay";
 };
 
-&spi0 {
+&isi0 {
 	status = "okay";
 
-	/* chip select 0 is typically the boot flash; start the SLIC at 1 */
-	proslic0: proslic@1 {
+	/*
+	 * The wrapper's own channel-select register picks the device, not
+	 * a real chip-select pin -- reg is 0 and 1 here, not offset by a
+	 * shared flash chip select the way a real SPI bus would be.
+	 */
+	proslic0: proslic@0 {
 		compatible = "silabs,si32192";
-		reg = <1>;
+		reg = <0>;
 		spi-max-frequency = <10000000>;
 		spi-cpha;
 		spi-cpol;
@@ -50,13 +56,12 @@
 
 		reset-gpios = <&pinctrl 20 GPIO_ACTIVE_LOW>;
 
-		/* Requires an ISI transport; the SPI adapter cannot drive this part. */
-		status = "disabled";
+		status = "okay";
 	};
 
-	proslic1: proslic@2 {
+	proslic1: proslic@1 {
 		compatible = "silabs,si32192";
-		reg = <2>;
+		reg = <1>;
 		spi-max-frequency = <10000000>;
 		spi-cpha;
 		spi-cpol;
@@ -64,7 +69,12 @@
 		airoha,pcm = <&pcm0>;
 		airoha,pcm-channel = <2>;
 
-		/* Requires an ISI transport; the SPI adapter cannot drive this part. */
+		/*
+		 * A second physical device on the same ISI bus needs the
+		 * chip-SCU DEV2 bits too -- see en75xx_isi_spi.c's file
+		 * header. Untested with two devices present; leave disabled
+		 * until that is verified on real hardware.
+		 */
 		status = "disabled";
 	};
 };

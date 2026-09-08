@@ -44,15 +44,21 @@ endef
 
 define KernelPackage/en75xx-slic-si3219x
   SUBMENU:=Voice over IP
-  TITLE:=Skyworks Si3218x/Si3219x ProSLIC FXS (SPI)
+  TITLE:=Skyworks Si3218x/Si3219x ProSLIC FXS (SPI/ISI)
   DEPENDS:=+kmod-en75xx-pcm
-  FILES:=$(PKG_BUILD_DIR)/en75xx-slic-si3219x.ko
-  AUTOLOAD:=$(call AutoLoad,51,en75xx-slic-si3219x)
+  FILES:= \
+	$(PKG_BUILD_DIR)/en75xx-isi-spi.ko \
+	$(PKG_BUILD_DIR)/en75xx-slic-si3219x.ko
+  AUTOLOAD:=$(call AutoLoad,51,en75xx-isi-spi en75xx-slic-si3219x)
 endef
 
 define KernelPackage/en75xx-slic-si3219x/description
- ProSLIC FXS driver built on the Skyworks ProSLIC API. Covers the
- Si32192 used on the TP-Link XX230v and XC220-G3v boards.
+ ProSLIC FXS driver built on the Skyworks ProSLIC API, plus the ISI
+ transport (en75xx-isi-spi, an spi_controller) that Si32192/Si32193
+ boards need underneath it -- Si32184/Si3228x boards on a real SPI bus
+ don't need it, but loading it costs nothing since it only binds to its
+ own DT nodes. Covers the Si32192 used on the TP-Link XX230v and
+ XC220-G3v boards.
 endef
 
 define KernelPackage/en75xx-slic-dxs-cibb12
