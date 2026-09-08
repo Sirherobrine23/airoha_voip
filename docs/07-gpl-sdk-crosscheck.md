@@ -37,9 +37,10 @@ quoted in `src/en75xx_pcm_regs.h`.
 Every offset the driver already used is confirmed. Three things were
 wrong:
 
-**There is no register at 0xa8.** The EN7523 start-up path wrote `0xa0`
+**The exported register table does not list 0xa8.** The EN7523 start-up path wrote `0xa0`
 there. The table has `txRxDMA` at 0x40 and `txRxChanEnable` at 0xac and
-nothing between. The write was removed.
+no intervening entry. This alone does not prove the hardware lacks other
+registers; the write was removed because its meaning is unverified.
 
 **The interrupt registers are eleven bits wide.** `ISR` and `INTMask`
 both carry a writable mask of `0x000007ff`. The "OEM interrupt mask
@@ -202,10 +203,11 @@ Reference Manual, lists the interface for each supported part:
 | MaxLinear | 2 | PEF32002 (DXS102) | SPI/PCM & CSI |
 
 ISI is the Skyworks equivalent of ZSI: the control channel rides the PCM
-bus. `en75xx_slic_si3219x.c` is an ordinary Linux SPI driver, which is
-right for a board that wires a four-wire SPI bus to the ProSLIC and
-wrong for one strapped for ISI. That is now stated in the file header.
-A board in the second group needs an ISI transport in front of the
+bus. `en75xx_slic_si3219x.c` is an ordinary Linux SPI driver, but the
+supplied evidence does not establish a conventional SPI mode for
+Si32192/Si32193. Their known compatibles are now rejected before bus setup
+or reset; see `08-proslic-review.en-US.md`. That is now stated in the file header.
+These boards need an ISI transport in front of the
 driver, in the shape of `en75xx_zsi.c`.
 
 The manual also confirms the MPI addressing this driver uses for the

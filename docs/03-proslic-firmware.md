@@ -94,7 +94,11 @@ The BOM cannot be detected -- the chip has no way to report how its
 DC-DC converter was wired -- so it comes from the `bom` module
 parameter, default `lcqc`. When a chipset+revision has exactly one
 patch, the converter also publishes it under the plain name so the
-fallback works without knowing the BOM.
+fallback can find that same patch. The header must still match the requested
+chipset, revision and BOM; a generic filename does not bypass this check.
+Only `bom=lcqc` is accepted by this driver because its electrical constants
+are compiled from the LCCB configuration. FB/BB/TSS require their own verified
+electrical parameters, not just a differently named firmware blob.
 
 ## Regenerating
 

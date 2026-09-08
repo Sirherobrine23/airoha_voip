@@ -10,10 +10,10 @@
  * Si32193 as ISI parts -- ISI multiplexes the ProSLIC control channel over
  * the PCM bus the same way ZSI does for the Microchip parts -- while the
  * Si32184/Si32185 and Si3228x are the ones it drives over plain SPI. This
- * driver is the SPI path. It is correct for a board that wires a four-wire
- * SPI bus to the ProSLIC, and it is the wrong driver for a board strapped
- * for ISI; such a board needs an ISI transport in front of it, in the shape
- * of en75xx_zsi.c.
+ * adapter currently implements SPI transactions only. No supported SPI mode
+ * for Si32192/Si32193 has been established by the available documentation.
+ * Their known compatibles are refused before reset or bus configuration;
+ * implementing ISI is required before enabling those board nodes.
  *
  * Three register fix-ups below come from the EcoNet mod-slic3 ProSLIC
  * integration in the TP-Link VB430 GPL drop and are applied after
@@ -66,13 +66,17 @@
 #define SI3219X_IRQEN2_HOOK	BIT(1)
 
 /*
- * BOM variant of the DC-DC converter on the board. It selects which
- * patch blob gets loaded, so it has to come from the device tree: the
- * chip cannot report how it was wired up.
+ * Patch BOM selector. Electrical parameters are compiled separately in
+ * si3219x_LCCB_constants.c; changing a firmware filename cannot change
+ * the converter topology. Reject unsupported variants before touching HW.
  */
+/* Only the LCCB electrical configuration is linked by src/Makefile. */
 static char *bom = "lcqc";
 module_param(bom, charp, 0444);
-MODULE_PARM_DESC(bom, "ProSLIC BOM variant (lcqc, fb, bb, tss, tss_iso)");
+MODULE_PARM_DESC(bom, "ProSLIC patch BOM (only lcqc with the compiled LCCB configuration)");
+
+/* The vendor API resolves patches through process-wide symbols. */
+static DEFINE_MUTEX(si3219x_init_lock);
 
 struct en75xx_si3219x {
 	struct spi_device *spi;
@@ -94,6 +98,7 @@ struct en75xx_si3219x {
 	bool ring_enabled;
 	bool ring_phase;
 	bool last_hook;
+	bool init_attempted;
 };
 
 static const u8 si3219x_chan_addr[32] = {
@@ -109,7 +114,8 @@ static int si3219x_reset(void *ctrl, int in_reset)
 
 	if (!slic->reset_gpio)
 		return RC_NONE;
-	gpiod_set_value_cansleep(slic->reset_gpio, in_reset ? 0 : 1);
+	/* Descriptor values are logical; GPIO_ACTIVE_LOW supplies inversion. */
+	gpiod_set_value_cansleep(slic->reset_gpio, !!in_reset);
 	return RC_NONE;
 }
 
@@ -364,10 +370,51 @@ static void si3219x_apply_pcm_fixups(struct en75xx_si3219x *slic)
 	si3219x_write_reg(slic, 0, PROSLIC_REG_IRQEN3, 0);
 }
 
+/* Best effort: bus errors or external supplies can prevent power-down. */
+static void en75xx_si3219x_power_down(struct en75xx_si3219x *slic)
+{
+	int ret;
+
+	if (!slic->init_attempted)
+		return;
+	ProSLIC_PCMStop(slic->channel);
+	ret = ProSLIC_PowerDownConverter(slic->channel);
+	if (ret != RC_NONE)
+		dev_warn(&slic->spi->dev, "converter power-down failed: %d\n", ret);
+	ProSLIC_SetLinefeedStatus(slic->channel, LF_OPEN);
+	si3219x_reset(slic, 1);
+	slic->init_attempted = false;
+}
+
+static void en75xx_si3219x_api_free(struct en75xx_si3219x *slic)
+{
+	en75xx_si3219x_power_down(slic);
+	SiVoice_destroyChannels(&slic->channel);
+	SiVoice_destroyDevices(&slic->device);
+	en75xx_proslic_fw_free(&slic->fw);
+}
+
 static int en75xx_si3219x_api_init(struct en75xx_si3219x *slic)
 {
 	unsigned int slot;
 	int ret;
+
+	/*
+	 * ProSLIC_PCMTimeSlotSetup() counts PCLK cycles from the frame
+	 * sync, so it wants the same bit offset the PCM engine assigned
+	 * to this channel. Deriving it from the engine's timeslot table
+	 * keeps the two ends in step; computing it as channel * 16 only
+	 * happens to agree when the table starts at offset 0, which the
+	 * default one does not.
+	 */
+	ret = en75xx_pcm_channel_bit_offset(slic->pcm, slic->pcm_channel);
+	if (ret < 0) {
+		dev_err(&slic->spi->dev,
+			"PCM channel %u has no timeslot configured\n",
+			slic->pcm_channel);
+		return ret;
+	}
+	slot = ret;
 
 	si3219x_control_init(slic);
 	ret = SiVoice_createDevice(&slic->device);
@@ -395,15 +442,19 @@ static int en75xx_si3219x_api_init(struct en75xx_si3219x *slic)
 	if (ret)
 		goto err;
 
+	mutex_lock(&si3219x_init_lock);
 	en75xx_proslic_fw_to_patch(&slic->fw, &si3219xPatchRevALCQC);
 	en75xx_proslic_fw_to_patch(&slic->fw, &RevAPatch);
 
 	SiVoice_Reset(slic->channel);
+	slic->init_attempted = true;
 	ret = ProSLIC_Init(slic->channel_ptrs, 1);
-	if (ret != RC_NONE) {
-		en75xx_proslic_fw_free(&slic->fw);
+	/* No shared symbol may retain pointers into this device's firmware. */
+	memset(&si3219xPatchRevALCQC, 0, sizeof(si3219xPatchRevALCQC));
+	memset(&RevAPatch, 0, sizeof(RevAPatch));
+	mutex_unlock(&si3219x_init_lock);
+	if (ret != RC_NONE)
 		goto err;
-	}
 
 	/*
 	 * Longitudinal balance calibration. The vendor runs it right after
@@ -411,26 +462,12 @@ static int en75xx_si3219x_api_init(struct en75xx_si3219x *slic)
 	 * line keeps the factory-default balance coefficients and common
 	 * mode rejection on a long loop is poor.
 	 */
-	if (ProSLIC_LBCal(slic->channel_ptrs, 1) != RC_NONE)
-		dev_warn(&slic->spi->dev,
-			 "longitudinal balance calibration failed\n");
-
-	/*
-	 * ProSLIC_PCMTimeSlotSetup() counts PCLK cycles from the frame
-	 * sync, so it wants the same bit offset the PCM engine assigned
-	 * to this channel. Deriving it from the engine's timeslot table
-	 * keeps the two ends in step; computing it as channel * 16 only
-	 * happens to agree when the table starts at offset 0, which the
-	 * default one does not.
-	 */
-	ret = en75xx_pcm_channel_bit_offset(slic->pcm, slic->pcm_channel);
-	if (ret < 0) {
+	ret = ProSLIC_LBCal(slic->channel_ptrs, 1);
+	if (ret != RC_NONE) {
 		dev_err(&slic->spi->dev,
-			"PCM channel %u has no timeslot configured\n",
-			slic->pcm_channel);
-		goto err_fw;
+			"longitudinal balance calibration failed: %d\n", ret);
+		goto err;
 	}
-	slot = ret;
 
 	if (ProSLIC_DCFeedSetup(slic->channel, DCFEED_48V_20MA) != RC_NONE ||
 	    ProSLIC_ZsynthSetup(slic->channel, ZSYN_600_0_0_30_0) != RC_NONE ||
@@ -440,7 +477,7 @@ static int en75xx_si3219x_api_init(struct en75xx_si3219x *slic)
 	    ProSLIC_SetLinefeedStatus(slic->channel, LF_FWD_ACTIVE) != RC_NONE ||
 	    ProSLIC_PCMStart(slic->channel) != RC_NONE) {
 		ret = -EIO;
-		goto err_fw;
+		goto err;
 	}
 
 	dev_dbg(&slic->spi->dev, "PCM channel %u at frame bit offset %u\n",
@@ -449,11 +486,8 @@ static int en75xx_si3219x_api_init(struct en75xx_si3219x *slic)
 	si3219x_apply_pcm_fixups(slic);
 	return 0;
 
-err_fw:
-	en75xx_proslic_fw_free(&slic->fw);
 err:
-	SiVoice_destroyChannels(&slic->channel);
-	SiVoice_destroyDevices(&slic->device);
+	en75xx_si3219x_api_free(slic);
 	return ret < 0 ? ret : -EIO;
 }
 
@@ -462,6 +496,16 @@ static int en75xx_si3219x_probe(struct spi_device *spi)
 	struct en75xx_si3219x *slic;
 	struct device_node *pcm_np;
 	int ret, hook;
+
+	if (of_device_is_compatible(spi->dev.of_node, "silabs,si32192") ||
+	    of_device_is_compatible(spi->dev.of_node, "silabs,si32193"))
+		return dev_err_probe(&spi->dev, -EOPNOTSUPP,
+			"Si32192/Si32193 require an ISI transport; SPI is not implemented for these parts\n");
+
+	/* A different patch does not change the compiled converter topology. */
+	if (strcasecmp(bom, "lcqc"))
+		return dev_err_probe(&spi->dev, -EINVAL,
+			"only BOM lcqc with the compiled LCCB configuration is supported\n");
 
 	slic = devm_kzalloc(&spi->dev, sizeof(*slic), GFP_KERNEL);
 	if (!slic)
@@ -512,8 +556,7 @@ static int en75xx_si3219x_probe(struct spi_device *spi)
 	return 0;
 
 err_api:
-	SiVoice_destroyChannels(&slic->channel);
-	SiVoice_destroyDevices(&slic->device);
+	en75xx_si3219x_api_free(slic);
 err_pcm:
 	en75xx_pcm_put(slic->pcm);
 	return ret;
@@ -526,12 +569,17 @@ static void en75xx_si3219x_remove(struct spi_device *spi)
 	cancel_delayed_work_sync(&slic->hook_work);
 	cancel_delayed_work_sync(&slic->ring_work);
 	en75xx_voice_unregister_line(slic->voice_line);
-	ProSLIC_PCMStop(slic->channel);
-	ProSLIC_SetLinefeedStatus(slic->channel, LF_OPEN);
-	SiVoice_destroyChannels(&slic->channel);
-	SiVoice_destroyDevices(&slic->device);
-	en75xx_proslic_fw_free(&slic->fw);
+	en75xx_si3219x_api_free(slic);
 	en75xx_pcm_put(slic->pcm);
+}
+
+static void en75xx_si3219x_shutdown(struct spi_device *spi)
+{
+	struct en75xx_si3219x *slic = spi_get_drvdata(spi);
+
+	cancel_delayed_work_sync(&slic->hook_work);
+	cancel_delayed_work_sync(&slic->ring_work);
+	en75xx_si3219x_power_down(slic);
 }
 
 static const struct of_device_id en75xx_si3219x_of_match[] = {
@@ -548,6 +596,7 @@ static struct spi_driver en75xx_si3219x_driver = {
 	},
 	.probe = en75xx_si3219x_probe,
 	.remove = en75xx_si3219x_remove,
+	.shutdown = en75xx_si3219x_shutdown,
 };
 module_spi_driver(en75xx_si3219x_driver);
 

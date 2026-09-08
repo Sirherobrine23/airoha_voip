@@ -50,7 +50,8 @@
 
 		reset-gpios = <&pinctrl 20 GPIO_ACTIVE_LOW>;
 
-		status = "okay";
+		/* Requires an ISI transport; the SPI adapter cannot drive this part. */
+		status = "disabled";
 	};
 
 	proslic1: proslic@2 {
@@ -63,6 +64,7 @@
 		airoha,pcm = <&pcm0>;
 		airoha,pcm-channel = <2>;
 
-		status = "okay";
+		/* Requires an ISI transport; the SPI adapter cannot drive this part. */
+		status = "disabled";
 	};
 };

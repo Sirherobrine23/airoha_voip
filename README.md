@@ -41,7 +41,7 @@ still needs per-board electrical and runtime validation.
 | G.711 and `/dev/en75xx-fxsN` | kernel-reference companding and endian paths corrected; integration test required |
 | ZSI transport | EN751221 legacy sequence retained explicitly; modern EN7523 resources wired, runtime validation required |
 | Le9642: profiles, slots, feed, ring cadence, hook | profiles and timeslot handling now match the vendor API; bench validation required |
-| Si3219x over SPI | implemented against the ProSLIC API; note that Airoha lists the Si32192 as an ISI part |
+| Si3219x adapter | experimental SPI adapter; Si32192/Si32193 require the missing ISI transport and their known compatibles are rejected |
 | MaxLinear PEF32001/PEF32002 (DUSLIC-XS) | not started; firmware blobs identified |
 | Asterisk channel driver | draft implementation; build/runtime testing against the target Asterisk version required |
 
@@ -141,3 +141,5 @@ source files.
 8. `docs/07-gpl-sdk-crosscheck.md` — what the Airoha LTS SDK sources
    shipped in the TP-Link VB430 GPL drop confirmed, and what they
    contradicted.
+
+Lifecycle and firmware review: [English](docs/08-proslic-review.en-US.md) / [Português](docs/08-proslic-review.pt-BR.md).

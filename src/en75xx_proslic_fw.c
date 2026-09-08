@@ -25,7 +25,9 @@
 #include "en75xx_proslic_fw.h"
 
 static int proslic_fw_parse(struct device *dev, const struct firmware *blob,
-			    const char *name, struct en75xx_proslic_fw *fw)
+			    const char *name, const char *chipset,
+			    char revision, const char *bom,
+			    struct en75xx_proslic_fw *fw)
 {
 	const struct proslic_fw_hdr *hdr;
 	const __le32 *src32;
@@ -56,13 +58,25 @@ static int proslic_fw_parse(struct device *dev, const struct firmware *blob,
 		return -EINVAL;
 	}
 
+	/* A filename (including the fallback name) does not identify a patch. */
+	if (strnlen(hdr->chipset, sizeof(hdr->chipset)) != strlen(chipset) ||
+	    strncasecmp(hdr->chipset, chipset, sizeof(hdr->chipset)) ||
+	    strnlen(hdr->revision, sizeof(hdr->revision)) != 1 ||
+	    tolower(hdr->revision[0]) != tolower(revision) ||
+	    (bom && *bom &&
+	     (strnlen(hdr->bom, sizeof(hdr->bom)) != strlen(bom) ||
+	      strncasecmp(hdr->bom, bom, sizeof(hdr->bom))))) {
+		dev_err(dev, "%s: patch chipset, revision or BOM mismatch\n", name);
+		return -EINVAL;
+	}
+
 	n_data = le16_to_cpu(hdr->n_data);
 	n_psdata = le16_to_cpu(hdr->n_psdata);
 	n_psaddr = le16_to_cpu(hdr->n_psaddr);
 	n_entries = le16_to_cpu(hdr->n_entries);
 
 	if (!n_data || n_data > PROSLIC_FW_MAX_DATA ||
-	    n_psaddr > PROSLIC_FW_MAX_PSRAM ||
+	    !n_psaddr || n_psaddr > PROSLIC_FW_MAX_PSRAM ||
 	    n_psdata != n_psaddr ||
 	    (n_entries != 8 && n_entries != PROSLIC_FW_NUM_ENTRIES)) {
 		dev_err(dev,
@@ -81,7 +95,8 @@ static int proslic_fw_parse(struct device *dev, const struct firmware *blob,
 		return -EINVAL;
 	}
 
-	crc = crc32(0, blob->data + PROSLIC_FW_HDR_SIZE, expect);
+	/* Match binascii.crc32() in tools/proslic-patch2fw.py. */
+	crc = crc32(~0U, blob->data + PROSLIC_FW_HDR_SIZE, expect) ^ ~0U;
 	if (crc != le32_to_cpu(hdr->crc32)) {
 		dev_err(dev, "%s: CRC mismatch (%#010x != %#010x)\n",
 			name, crc, le32_to_cpu(hdr->crc32));
@@ -167,7 +182,7 @@ int en75xx_proslic_fw_load(struct device *dev, const char *chipset,
 	}
 
 parse:
-	ret = proslic_fw_parse(dev, blob, name, fw);
+	ret = proslic_fw_parse(dev, blob, name, chipset, revision, bom, fw);
 	release_firmware(blob);
 	return ret;
 }
