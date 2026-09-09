@@ -112,10 +112,21 @@ mask only enables four.
 
 ## Interrupts
 
-On EN751221 the PCM interrupt (hwirq 12) does not map cleanly — the INTC
-reports it as a shadow interrupt. The driver requests the IRQ if the
-device tree provides one and otherwise falls back to a polling worker,
-so the DTS ships with `interrupts` commented out.
+The vendor's own interrupt tables settle the numbering. On the MIPS
+parts, `asm/tc3162/tc3182_int_source.h` puts PCM1 on hardware line 11 in
+both the 1004K and the older enumeration; PCM2 is line 32 on 1004K and
+33 otherwise. An earlier note here said the EN751221 PCM interrupt was
+hwirq 12 and did not map cleanly. Line 12 is `SI_PC1_INT`, a different
+source entirely, which is the likelier explanation of the "shadow
+interrupt" than anything wrong with the controller. The EN751221
+fragment already ships 11 and 33.
+
+On the ARM parts it is GIC SPI 27, level high, in every vendor device
+tree seen so far: EN7523, EN7529, EN7552, EN7580, EN7581 and AN7583 all
+carry the identical node.
+
+The driver requests the IRQ when the device tree provides one and falls
+back to a polling worker when it does not.
 
 ## Building
 

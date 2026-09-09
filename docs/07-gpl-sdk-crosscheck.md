@@ -242,3 +242,92 @@ proprietary `pcm1.ko`. One memory resource, one interrupt, nothing else.
   stays opt-in and EN751221-only, so nothing changed.
 - Everything electrical. None of this replaces an oscilloscope on
   PCLK/FSYNC, and none of it has been run on hardware.
+
+## Second pass: nineteen more TP-Link GPL drops
+
+The VB430 drop is not the only one TP-Link has published. Nineteen more
+were surveyed, covering seven EcoNet/Airoha SoCs. Each was downloaded,
+its file list kept, the VoIP-relevant paths extracted, and the archive
+deleted.
+
+| drop | SoC | VoIP BSP source |
+| --- | --- | --- |
+| XN020-G3 v1 | EN7526G (EN751221 family), kernel 3.18 | no |
+| XN020-G3 US1 v2 | EN7526G | no |
+| XN020-G3 US1 v3, XN020-G3v 2.0 | EN7528 | no |
+| XC220-G3 BR v1 | EN7528 | no |
+| XN021-G3, XZ000-G3 v2, XZ001-G3 | EN7526G | no |
+| XX231v | EN7529 | no |
+| XGZ030 v1 | EN7580 | no |
+| VB430 (first pass) | AN7551 / AN7581 | **yes** |
+
+Only the VB430 drop ships the VoIP BSP as source. The rest carry the
+platform code (`mach-econet`, `asm/tc3162`, the vendor device trees) and,
+in the older ones, prebuilt `slic3.ko` and `voip.ko` for the Ralink-era
+parts. That makes VB430 the reference for the SLIC layer and the others
+useful mainly for platform detail.
+
+### The PCM interrupt, settled
+
+`asm/tc3162/tc3182_int_source.h` carries the MIPS interrupt map in two
+enumerations, one for 1004K parts and one for everything older:
+
+| source | 1004K | older |
+| --- | --- | --- |
+| PCM1 | 11 | 11 |
+| PCM2 | 32 | 33 |
+| SI_PC1 | — | 12 |
+
+PCM1 is hardware line 11 in both. An earlier note in this project put the
+EN751221 PCM interrupt at hwirq 12 and called it a shadow interrupt that
+did not map cleanly; line 12 is `SI_PC1_INT`, an unrelated source. The
+EN751221 fragment already carries 11 and 33, so this confirms values that
+were previously uncertain rather than changing them.
+
+On the ARM parts the node is identical across every drop seen:
+
+```
+pcm@bfbd0000 {
+	compatible = "econet,ecnt-pcm";
+	reg = <0x1fbd0000 0x4fff>;
+	interrupts = <GIC_SPI 27 IRQ_TYPE_LEVEL_HIGH>;
+};
+```
+
+confirmed now on EN7523, EN7529, EN7552, EN7580, EN7581 and AN7583.
+
+### The converter topology
+
+`ZLR964124_Le9641_IB_profiles.c` sits beside the BB profiles in the same
+VB430 drop and had not been read. It carries the second device profile
+the vendor selects between:
+
+| | buck-boost | inverting boost |
+| --- | --- | --- |
+| profile | `DEV_PROFILE_100V_BB_124_ZSI` | `DEV_PROFILE_90V_IB_124` |
+| switcher | 47 uH buck-boost | 500 kHz inductorless |
+| rails | 12 V in, 100 V out | 12 V in, 90 V out |
+| limits | 98 V, 98 V | 92 V, 92 V |
+
+Eighteen bytes differ: device mode, the switching-regulator timing and
+parameter blocks, the regulator control byte, the switcher configuration
+nibble, the free-run and low-power timing, and the voltage limits. The
+DC profiles differ in one formatted byte, the ground-key absolute bit,
+and the ring profiles are identical.
+
+`le9641_reset_slicParams()` chooses from `slic_power_type`, a module
+parameter, because nothing in the chip reports the circuit around it.
+This driver hardcoded buck-boost. It now requires
+`airoha,slic-power-type` and refuses to probe without it, because
+streaming one topology's switching parameters at the other is a way to
+damage a power converter rather than a way to get silence.
+
+### Alarms
+
+`VP886_R_SIGREG_*` in the API headers documents three bits the cadence
+worker was already reading and discarding: `TEMPA` thermal alarm,
+`OCALM` switcher over-current, and `CFAIL` clock fault in byte 0. The
+API's own comment on the auto-shutdown configuration says the
+protections are "the power up default", so the chip defends itself
+whether or not the driver programs `SSCFG`. What was missing was any way
+to learn that it had. Those bits are now logged and reported.
