@@ -44,7 +44,7 @@ still needs per-board electrical and runtime validation.
 | Le9642 converter topology | `bb` and `ib` profiles from the vendor sources; selection is required, not defaulted |
 | Le9642 alarms | thermal, over-current and clock-fault bits reported from SIGREG; the converter is powered down on remove and shutdown |
 | Si3219x adapter | experimental SPI adapter; Si32192/Si32193 require the missing ISI transport and their known compatibles are rejected |
-| MaxLinear PEF32001/PEF32002 (DUSLIC-XS) | not started; firmware blobs identified |
+| MaxLinear PEF32001/PEF32002 (DUSLIC-XS) | not started; firmware blobs identified, and the upstream packages now named, see `docs/09` |
 | Asterisk channel driver | draft implementation; build/runtime testing against the target Asterisk version required |
 
 ## Two SLIC families, two transports
@@ -174,6 +174,8 @@ source files.
    — what was corrected, what is confirmed, and what remains to prove.
 8. `docs/07-gpl-sdk-crosscheck.md` — what the Airoha LTS SDK sources
    shipped in the TP-Link VB430 GPL drop confirmed, and what they
-   contradicted.
+   contradicted, plus a survey of nineteen further drops.
+9. `docs/09-maxlinear-dxs.md` — what the drops give us towards the
+   DUSLIC-XS family, and what is still missing.
 
 Lifecycle and firmware review: [English](docs/08-proslic-review.en-US.md) / [Português](docs/08-proslic-review.pt-BR.md).
