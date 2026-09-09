@@ -39,6 +39,17 @@
 		airoha,zsi = <&zsi0>;
 		airoha,pcm = <&pcm0>;
 		airoha,lines = <2>;
+
+		/*
+		 * The board's high-voltage converter topology. "bb" is a
+		 * 47 uH buck-boost (12 V in, 100 V out); "ib" is a 500 kHz
+		 * inductorless inverting boost (12 V in, 90 V out). This
+		 * has no default and the driver refuses to probe without
+		 * it: the two profiles program different switching timing
+		 * into the same pins, and the wrong one can damage the
+		 * converter. Read it off the schematic.
+		 */
+		airoha,slic-power-type = "bb";
 		airoha,bus-slots = <4 6>;
 		status = "okay";
 	};

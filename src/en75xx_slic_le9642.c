@@ -38,6 +38,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/workqueue.h>
 
 #include "../include/en75xx_voice.h"
@@ -86,6 +87,12 @@
 #define VP886_STATE_RING_ACTIVE		0x80	/* readback flag */
 
 #define VP886_SWCTRL_ON			0x6f	/* HP/HP */
+/*
+ * Both switcher modes off, keeping polarity and frequency. This is the
+ * value the device profiles ship (byte 25), so it is what the chip sits
+ * at between le9642_set_feed() calls in the vendor's own flow.
+ */
+#define VP886_SWCTRL_OFF		0x60
 
 /*
  * OPFUNC bits 7:6 select the codec (A-law 0x00, u-law 0x40, 16-bit
@@ -99,7 +106,17 @@
 #define VP886_OPFUNC_LINEAR		(0x80 | VP886_OPFUNC_ALL_FILTERS)
 
 #define VP886_SIGREG_LEN		4
+/*
+ * SIGREG bytes 0 and 1 are per-channel. The hook bit is what the
+ * cadence worker is after, but the alarm bits arrive in the same read,
+ * so watching them costs nothing on a bus where every byte takes 5 ms.
+ * CFAIL is byte 0 only and is device-wide.
+ */
 #define VP886_SIGREG_HOOK		0x01
+#define VP886_SIGREG_TEMPA		0x20	/* thermal alarm */
+#define VP886_SIGREG_OCALM		0x40	/* switcher over-current */
+#define VP886_SIGREG_CFAIL		0x80	/* clock fault, byte 0 only */
+#define VP886_SIGREG_ALARMS		(VP886_SIGREG_TEMPA | VP886_SIGREG_OCALM)
 
 /*
  * Ring cadence. The tick worker also samples the hook, so the tick is
@@ -131,13 +148,36 @@
 #define VP_PROFILE_DATA_START	6
 
 /*
- * DEV_PROFILE_100V_BB_124_ZSI. Byte 9 -- the operand of the 0x44
- * CLKSLOTS write -- is 0x46 and not 0x06: bit 6 is the transmit clock
- * edge (XE), which the vendor patches to "positive" for every ZSI
- * board, and bits 2:0 are the +6 PCLK transmit clock slot that pairs
- * with the timeslot shift in le9642_program_slots().
+ * The board's high-voltage converter topology decides the device
+ * profile, and getting it wrong is the one mistake here that can damage
+ * hardware rather than just produce silence.
+ *
+ * Eighteen bytes differ between the two profiles below, and they are
+ * the ones that matter: device mode, the switching-regulator timing and
+ * parameter blocks, the regulator control byte, the switcher
+ * configuration nibble and the output voltage limits. Streaming the
+ * buck-boost profile at an inverting-boost board programs a 47 uH
+ * buck-boost converter's timing into a 500 kHz inductorless boost, and
+ * vice versa.
+ *
+ * The vendor picks between them from a `slic_power_type` module
+ * parameter (`mode=IB` on the command line). There is no way to detect
+ * it from the chip, so this driver requires the device tree to say
+ * which one the board is and refuses to probe otherwise. A prototype
+ * that can cook a switcher should not guess.
+ *
+ * Byte 9, the operand of the 0x44 CLKSLOTS write, is patched to 0x46 at
+ * run time for both topologies, exactly as le9641_reset_slicParams()
+ * does: bit 6 is the transmit clock edge and bits 2:0 are the +6 PCLK
+ * transmit clock slot that pairs with the shift in
+ * le9642_program_slots(). Both profiles are stored with their vendor
+ * value so they stay comparable with the sources they came from.
  */
-static const u8 dev_profile[] = {
+#define VP_PROFILE_ZSI_CLKSLOTS_OFF	9
+#define VP_PROFILE_ZSI_CLKSLOTS		0x46
+
+/* DEV_PROFILE_100V_BB_124_ZSI: buck-boost, 47 uH, 12 V in, 100 V out */
+static const u8 dev_profile_bb[] = {
 	0x0d, 0xff, 0x00, 0x28, 0x04, 0x14,
 	0x46, 0x02, 0x44, 0x46, 0x5e, 0x14, 0x00, 0xf6, 0x95, 0x00,
 	0x58, 0x30, 0x5c, 0x30, 0xe4, 0x44, 0x92, 0x0a, 0xe6, 0x60,
@@ -146,12 +186,33 @@ static const u8 dev_profile[] = {
 	0x14, 0xff, 0x95, 0x00, 0x62, 0x62, 0x04, 0x3c,
 };
 
-/* DC_FXS_miSLIC_BB_DEF */
-static const u8 dc_profile[] = {
+/* DEV_PROFILE_90V_IB_124: inverting boost, 500 kHz, 12 V in, 90 V out */
+static const u8 dev_profile_ib[] = {
+	0x0d, 0xff, 0x00, 0x28, 0x04, 0x14,
+	0x46, 0x02, 0x44, 0x40, 0x5e, 0x0c, 0x80, 0xf6, 0x66, 0x00,
+	0x64, 0x30, 0x74, 0x30, 0xe4, 0x04, 0x92, 0x0a, 0xe6, 0x00,
+	/* formatted parameters, not streamed */
+	0x00, 0x03, 0x00, 0x00, 0x01, 0x65, 0x00, 0x64, 0x52, 0x64,
+	0x52, 0xff, 0x66, 0x00, 0x5c, 0x5c, 0x04, 0x3c,
+};
+
+/*
+ * DC_FXS_miSLIC_BB_DEF and DC_FXS_miSLIC_IB_DEF. Only the first
+ * formatted byte differs, and only in the ground-key absolute bit, but
+ * they are kept apart to stay faithful to the vendor sources.
+ */
+static const u8 dc_profile_bb[] = {
 	0x0d, 0x01, 0x00, 0x0c, 0x02, 0x03,
 	0xc6, 0x92, 0x27,
 	/* formatted parameters, not streamed */
 	0x9c, 0x84, 0x58, 0x80, 0x02, 0x00, 0x07,
+};
+
+static const u8 dc_profile_ib[] = {
+	0x0d, 0x01, 0x00, 0x0c, 0x02, 0x03,
+	0xc6, 0x92, 0x27,
+	/* formatted parameters, not streamed */
+	0x1c, 0x84, 0x58, 0x80, 0x02, 0x00, 0x07,
 };
 
 /* AC_FXS_RF14_600R_DEF_LE9641 */
@@ -168,7 +229,10 @@ static const u8 ac_profile[] = {
 	0x00,
 };
 
-/* RING_ZL880_BB90V_DEF, ~24.9 Hz, ~70 Vpk */
+/*
+ * RING_ZL880_BB90V_DEF, ~24.9 Hz, ~70 Vpk. Byte for byte the same
+ * as RING_ZL880_IB90V_DEF, so one copy serves both topologies.
+ */
 static const u8 ring_profile[] = {
 	0x0d, 0x04, 0x00, 0x12, 0x01, 0x0c,
 	0xc0, 0x08, 0x00, 0x00, 0x00, 0x44, 0x3a, 0x9d, 0x00, 0x00, 0x00, 0x00,
@@ -197,6 +261,7 @@ struct le9642_line {
 	unsigned int		ring_period_ticks;
 	unsigned int		hook_streak;
 	bool			hook_pending;
+	u8			alarms;
 };
 
 struct le9642_slic {
@@ -210,6 +275,12 @@ struct le9642_slic {
 	u8			rcn, pcn;
 	enum en75xx_pcm_codec	codec;
 	bool			zsi_tx_shift;
+	/* chosen by the board's converter topology; see the profiles above */
+	const u8		*dev_profile;
+	size_t			dev_profile_len;
+	const u8		*dc_profile;
+	size_t			dc_profile_len;
+	const char		*power_type;
 };
 
 /*
@@ -218,9 +289,11 @@ struct le9642_slic {
  * the low setting the mic modulation barely reaches the voice ADC, so
  * capture sits at idle. mA = 18 + field; 0x14 = 38 mA.
  */
-static int feed_ila = 0x14;
+static int feed_ila = 0x07;
 module_param(feed_ila, int, 0644);
-MODULE_PARM_DESC(feed_ila, "DC feed loop current limit field (mA = 18 + n)");
+MODULE_PARM_DESC(feed_ila,
+	"DC feed loop current limit field (mA = 18 + n); default 7 is the "
+	"vendor profile's 25 mA, raise it only if capture is weak");
 
 /*
  * Wire format. The EcoNet reference integration runs these parts with
@@ -229,6 +302,18 @@ MODULE_PARM_DESC(feed_ila, "DC feed loop current limit field (mA = 18 + n)");
  * modes remain available for boards that need them; companding then
  * happens in the PCM data path and the character device is unaffected.
  */
+/*
+ * Converter topology. There is no way to read this back from the chip,
+ * and the wrong choice programs one switching topology's timing into
+ * another, so there is no default: the device tree must say, or the
+ * module parameter must, and probe fails if neither does.
+ */
+static char *power_type;
+module_param(power_type, charp, 0444);
+MODULE_PARM_DESC(power_type,
+	"converter topology: bb (buck-boost) or ib (inverting boost); "
+	"overridden by airoha,slic-power-type in the device tree");
+
 static char *codec = "linear";
 module_param(codec, charp, 0444);
 MODULE_PARM_DESC(codec, "wire codec: linear (default), ulaw or alaw");
@@ -340,15 +425,47 @@ static int le9642_detect(struct le9642_slic *slic)
 /* Profiles                                                            */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Stream the device profile, patching the ZSI transmit clock-slot byte
+ * on the way out. The vendor does the same edit in place on its static
+ * profile; doing it in a copy keeps the stored arrays identical to the
+ * sources they were quoted from.
+ */
+static int le9642_stream_dev_profile(struct le9642_slic *slic)
+{
+	size_t mpi_len = slic->dev_profile[VP_PROFILE_MPI_LEN];
+	u8 mpi[32];
+	int ret;
+
+	if (VP_PROFILE_DATA_START + mpi_len > slic->dev_profile_len ||
+	    mpi_len > sizeof(mpi))
+		return -EINVAL;
+
+	memcpy(mpi, slic->dev_profile + VP_PROFILE_DATA_START, mpi_len);
+	if (slic->zsi_tx_shift) {
+		size_t off = VP_PROFILE_ZSI_CLKSLOTS_OFF - VP_PROFILE_DATA_START;
+
+		if (off >= mpi_len)
+			return -EINVAL;
+		mpi[off] = VP_PROFILE_ZSI_CLKSLOTS;
+	}
+
+	ret = en75xx_zsi_write(slic->zsi, mpi, mpi_len);
+	if (ret)
+		dev_err(slic->dev, "MPI stream 'dev' failed: %d\n", ret);
+	return ret;
+}
+
 static int le9642_load_device_profile(struct le9642_slic *slic)
 {
 	u8 devmode;
 	int ret;
 
-	ret = le9642_stream(slic, 0, "dev", dev_profile);
+	ret = le9642_stream_dev_profile(slic);
 	if (ret)
 		return ret;
-	ret = le9642_stream(slic, 0, "dc", dc_profile);
+	ret = le9642_stream_profile(slic, 0, "dc", slic->dc_profile,
+				    slic->dc_profile_len);
 	if (ret)
 		return ret;
 	ret = le9642_stream(slic, 0, "ac", ac_profile);
@@ -377,7 +494,8 @@ static int le9642_load_channel_profile(struct le9642_slic *slic, u8 ec)
 {
 	int ret;
 
-	ret = le9642_stream(slic, ec, "dc-ch", dc_profile);
+	ret = le9642_stream_profile(slic, ec, "dc-ch", slic->dc_profile,
+				    slic->dc_profile_len);
 	if (ret)
 		return ret;
 	ret = le9642_stream(slic, ec, "ac-ch", ac_profile);
@@ -392,7 +510,7 @@ static int le9642_load_channel_profile(struct le9642_slic *slic, u8 ec)
 
 static int le9642_set_feed(struct le9642_slic *slic, struct le9642_line *line)
 {
-	const u8 *dc_mpi = dc_profile + VP_PROFILE_DATA_START;
+	const u8 *dc_mpi = slic->dc_profile + VP_PROFILE_DATA_START;
 	u8 dc[2] = { dc_mpi[1], (u8)((dc_mpi[2] & ~0x1f) | (feed_ila & 0x1f)) };
 	int ret;
 
@@ -500,10 +618,20 @@ static int le9642_audio_setup(struct le9642_slic *slic,
 	return 0;
 }
 
+/*
+ * Read the hook state, and report the alarm bits that come with it.
+ *
+ * The chip defends itself: over-current, over-voltage and charge-pump
+ * under-voltage auto-shutdown are on out of reset, per the vendor API's
+ * own note on the matter. What was missing was any way to find out that
+ * it had. Without this, a line that trips thermal or over-current
+ * protection just goes quiet and nothing says why.
+ */
 static int le9642_read_hook(struct le9642_slic *slic, struct le9642_line *line,
 			    bool *offhook)
 {
 	u8 sig[VP886_SIGREG_LEN];
+	u8 alarms;
 	int ret;
 
 	/* device-level register: one byte per channel, index = ec - 1 */
@@ -511,6 +639,27 @@ static int le9642_read_hook(struct le9642_slic *slic, struct le9642_line *line,
 				  sig, sizeof(sig));
 	if (ret)
 		return ret;
+
+	alarms = sig[line->ec - 1] & VP886_SIGREG_ALARMS;
+	if (line->ec == VP886_EC_1)
+		alarms |= sig[0] & VP886_SIGREG_CFAIL;
+
+	if (alarms != line->alarms) {
+		u8 raised = alarms & ~line->alarms;
+		u8 cleared = line->alarms & ~alarms;
+
+		if (raised & VP886_SIGREG_TEMPA)
+			dev_warn(slic->dev, "EC_%u thermal alarm\n", line->ec);
+		if (raised & VP886_SIGREG_OCALM)
+			dev_warn(slic->dev, "EC_%u switcher over-current\n",
+				 line->ec);
+		if (raised & VP886_SIGREG_CFAIL)
+			dev_warn(slic->dev, "PCM clock fault\n");
+		if (cleared)
+			dev_info(slic->dev, "EC_%u alarms cleared (0x%02x)\n",
+				 line->ec, cleared);
+		line->alarms = alarms;
+	}
 
 	*offhook = !!(sig[line->ec - 1] & VP886_SIGREG_HOOK);
 	return 0;
@@ -613,7 +762,10 @@ static int le9642_op_set_linefeed(void *priv,
 
 static int le9642_op_get_faults(void *priv, u32 *faults)
 {
-	*faults = 0;
+	struct le9642_line *line = priv;
+
+	/* latched by the tick worker from SIGREG; see le9642_read_hook() */
+	*faults = READ_ONCE(line->alarms);
 	return 0;
 }
 
@@ -733,6 +885,47 @@ static int le9642_bringup(struct le9642_slic *slic)
 	return 0;
 }
 
+/*
+ * Pick the device and DC profiles from the board's converter topology.
+ * "bb" is a 47 uH buck-boost running 12 V to 100 V; "ib" is a 500 kHz
+ * inductorless inverting boost running 12 V to 90 V. Check the
+ * schematic, not the datasheet of the SLIC: this describes the circuit
+ * around the chip, not the chip.
+ */
+static void le9642_power_down(struct le9642_slic *slic);
+
+static int le9642_select_power_type(struct le9642_slic *slic,
+				    struct device_node *np)
+{
+	const char *type = power_type;
+
+	of_property_read_string(np, "airoha,slic-power-type", &type);
+
+	if (!type)
+		return dev_err_probe(slic->dev, -EINVAL,
+			"no converter topology given: set airoha,slic-power-type to \"bb\" or \"ib\" (this drives the high-voltage switcher and the wrong value can damage the board)\n");
+
+	if (!strcmp(type, "bb")) {
+		slic->dev_profile = dev_profile_bb;
+		slic->dev_profile_len = sizeof(dev_profile_bb);
+		slic->dc_profile = dc_profile_bb;
+		slic->dc_profile_len = sizeof(dc_profile_bb);
+	} else if (!strcmp(type, "ib")) {
+		slic->dev_profile = dev_profile_ib;
+		slic->dev_profile_len = sizeof(dev_profile_ib);
+		slic->dc_profile = dc_profile_ib;
+		slic->dc_profile_len = sizeof(dc_profile_ib);
+	} else {
+		return dev_err_probe(slic->dev, -EINVAL,
+			"unknown converter topology \"%s\"; expected \"bb\" or \"ib\"\n",
+			type);
+	}
+
+	slic->power_type = slic->dev_profile == dev_profile_bb ?
+		"buck-boost 100 V" : "inverting boost 90 V";
+	return 0;
+}
+
 static int le9642_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -784,6 +977,10 @@ static int le9642_probe(struct platform_device *pdev)
 	 * turns it off.
 	 */
 	slic->zsi_tx_shift = !of_property_read_bool(np, "airoha,no-zsi-tx-shift");
+
+	ret = le9642_select_power_type(slic, np);
+	if (ret)
+		goto err_pcm;
 	slic->n_lines = clamp_val(n_lines, 1, 2);
 	for (i = 0; i < slic->n_lines; i++) {
 		if (slots[i] > LE9642_MAX_SLOT) {
@@ -827,6 +1024,11 @@ static int le9642_probe(struct platform_device *pdev)
 	ret = le9642_bringup(slic);
 	if (ret) {
 		dev_err(dev, "bring-up failed: %d\n", ret);
+		/*
+		 * A line may already have had its feed switched on before
+		 * the failure, and nothing is going to watch it now.
+		 */
+		le9642_power_down(slic);
 		goto err_pcm;
 	}
 
@@ -846,7 +1048,8 @@ static int le9642_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, slic);
 	schedule_delayed_work(&slic->tick_work, msecs_to_jiffies(RING_TICK_MS));
 
-	dev_info(dev, "%u FXS line(s) ready\n", slic->n_lines);
+	dev_info(dev, "%u FXS line(s) ready, %s converter\n",
+		 slic->n_lines, slic->power_type);
 	for (i = 0; i < slic->n_lines; i++)
 		dev_info(dev, "  line %u: EC_%u, bus slot %u, PCM channel %u\n",
 			 i, slic->line[i].ec, slic->line[i].bus_slot,
@@ -863,6 +1066,31 @@ err_zsi:
 	return ret;
 }
 
+/*
+ * Drop every line to DISCONNECT and turn the switcher off.
+ *
+ * Setting the line state alone collapses the feed but leaves the
+ * high-voltage converter running, which is not something to leave
+ * behind on a module unload or a reboot. Errors are ignored on purpose:
+ * this runs on paths that cannot fail, and a dead transport is exactly
+ * when there is nothing further to be done anyway.
+ */
+static void le9642_power_down(struct le9642_slic *slic)
+{
+	unsigned int i;
+
+	mutex_lock(&slic->lock);
+	for (i = 0; i < slic->n_lines; i++) {
+		struct le9642_line *line = &slic->line[i];
+
+		line->ringing = false;
+		le9642_set_state(slic, line, VP886_SS_DISCONNECT, false);
+		le9642_cmd1(slic, line->ec, VP886_R_SWCTRL_WRT,
+			    VP886_SWCTRL_OFF);
+	}
+	mutex_unlock(&slic->lock);
+}
+
 static void le9642_remove(struct platform_device *pdev)
 {
 	struct le9642_slic *slic = platform_get_drvdata(pdev);
@@ -870,18 +1098,29 @@ static void le9642_remove(struct platform_device *pdev)
 
 	cancel_delayed_work_sync(&slic->tick_work);
 
-	for (i = 0; i < slic->n_lines; i++) {
-		struct le9642_line *line = &slic->line[i];
+	for (i = 0; i < slic->n_lines; i++)
+		if (slic->line[i].voice)
+			en75xx_voice_unregister_line(slic->line[i].voice);
 
-		if (line->voice)
-			en75xx_voice_unregister_line(line->voice);
-		mutex_lock(&slic->lock);
-		le9642_set_state(slic, line, VP886_SS_DISCONNECT, false);
-		mutex_unlock(&slic->lock);
-	}
+	le9642_power_down(slic);
 
 	en75xx_pcm_put(slic->pcm);
 	en75xx_zsi_put(slic->zsi);
+}
+
+/*
+ * Reboot and power-off. The bootloader does not know the SLIC is
+ * feeding a line, so leave the converter off rather than let it run
+ * across the reset.
+ */
+static void le9642_shutdown(struct platform_device *pdev)
+{
+	struct le9642_slic *slic = platform_get_drvdata(pdev);
+
+	if (!slic)
+		return;
+	cancel_delayed_work_sync(&slic->tick_work);
+	le9642_power_down(slic);
 }
 
 static const struct of_device_id le9642_of_match[] = {
@@ -895,6 +1134,7 @@ MODULE_DEVICE_TABLE(of, le9642_of_match);
 static struct platform_driver le9642_driver = {
 	.probe = le9642_probe,
 	.remove = le9642_remove,
+	.shutdown = le9642_shutdown,
 	.driver = {
 		.name = "en75xx-slic-le9642",
 		.of_match_table = le9642_of_match,

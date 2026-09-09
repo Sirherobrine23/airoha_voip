@@ -41,6 +41,8 @@ still needs per-board electrical and runtime validation.
 | G.711 and `/dev/en75xx-fxsN` | kernel-reference companding and endian paths corrected; integration test required |
 | ZSI transport | EN751221 legacy sequence retained explicitly; modern EN7523 resources wired, runtime validation required |
 | Le9642: profiles, slots, feed, ring cadence, hook | profiles and timeslot handling now match the vendor API; bench validation required |
+| Le9642 converter topology | `bb` and `ib` profiles from the vendor sources; selection is required, not defaulted |
+| Le9642 alarms | thermal, over-current and clock-fault bits reported from SIGREG; the converter is powered down on remove and shutdown |
 | Si3219x adapter | experimental SPI adapter; Si32192/Si32193 require the missing ISI transport and their known compatibles are rejected |
 | MaxLinear PEF32001/PEF32002 (DUSLIC-XS) | not started; firmware blobs identified |
 | Asterisk channel driver | draft implementation; build/runtime testing against the target Asterisk version required |
@@ -53,6 +55,27 @@ PCLK/FSYNC, and every control byte needs a ~5 ms gap for the SLIC to
 clock it over the 8 kHz bus. Driving it as plain SPI leaves it
 electrically mute, which looks exactly like a dead board. The ProSLIC
 parts are ordinary SPI devices and use the Linux SPI subsystem.
+
+## The converter topology is not optional
+
+`airoha,slic-power-type` has to be in the device tree, `"bb"` or `"ib"`,
+and the Le9642 driver refuses to probe without it.
+
+The SLIC sits behind a high-voltage converter that the board builds
+around it, and the device profile programs that converter: switching
+timing, regulator parameters, switcher configuration, output voltage
+limits. Airoha ships two profiles for the Le9641/Le9642, a 47 uH
+buck-boost at 12 V in and 100 V out, and a 500 kHz inductorless
+inverting boost at 12 V in and 90 V out. Eighteen bytes differ, and they
+are all in that group. Nothing in the chip reports which circuit it is
+wired into, and the vendor picks with a `mode=IB` module parameter.
+
+An earlier revision hardcoded the buck-boost profile. On an
+inductorless-boost board that programs one converter's switching
+behaviour into another, which is a way to destroy the switching
+transistor or the inductor rather than merely produce silence. Failing
+the probe is the right answer to a question the software cannot answer
+for itself.
 
 ## The Le9642 transmit slot, and why G.711 is no longer the default
 

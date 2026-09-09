@@ -176,6 +176,7 @@ Le9642, child of the ZSI node:
 | `airoha,pcm`       | phandle to the PCM instance                                |
 | `airoha,lines`     | 1 or 2                                                     |
 | `airoha,bus-slots` | one PCM **bus** timeslot per line                          |
+| `airoha,slic-power-type` | **required**: `"bb"` or `"ib"`, see below              |
 | `airoha,a-law`     | 16-bit linear is the default; see below                    |
 | `airoha,no-zsi-tx-shift` | only for a board wiring this part over plain SPI/PCM |
 
@@ -184,6 +185,19 @@ integration uses and what the PCM engine's 16-bit timeslots expect. Set
 `airoha,a-law`, or the module parameter `codec=ulaw`, to run G.711
 instead; the driver then compands in the PCM data path and the character
 device is unchanged either way.
+
+`airoha,slic-power-type` names the high-voltage converter around the
+SLIC, and it has no default. `"bb"` is a 47 uH buck-boost running 12 V
+to 100 V; `"ib"` is a 500 kHz inductorless inverting boost running 12 V
+to 90 V. Eighteen bytes of the device profile differ between them, and
+they are the switching-regulator timing, the regulator parameters, the
+regulator control byte, the switcher configuration and the output
+voltage limits. Streaming one topology's profile at the other programs
+the wrong switching behaviour into a real power converter, so the driver
+refuses to probe rather than guess. The vendor makes the same choice
+through a `mode=IB` module parameter. Read it off the schematic; the
+SLIC datasheet will not tell you, because this describes the circuit
+around the chip rather than the chip.
 
 `airoha,no-zsi-tx-shift` turns off the one-slot transmit shift that
 compensates for the two PCLK cycles ZSI adds on transmit. It exists only
