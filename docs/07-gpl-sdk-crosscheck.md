@@ -284,6 +284,17 @@ did not map cleanly; line 12 is `SI_PC1_INT`, an unrelated source. The
 EN751221 fragment already carries 11 and 33, so this confirms values that
 were previously uncertain rather than changing them.
 
+The header is byte-identical in the AN7551, EN7516, EN7529 and EN7580
+SDKs, which is four independent drops agreeing.
+
+One caveat on where to read it. These SoCs ship two interrupt headers,
+and only `tc3182_int_source.h` names the PCM sources. The sibling
+`int_source.h` used by some configurations leaves the same slot as
+`RESERVED1` at line 11, IPL20 — the same position and priority level,
+just unnamed on a build where voice is not wired. So the numbers hold,
+but a grep for `PCM1_INT` in the wrong header of the pair comes back
+empty, which is easy to misread as the interrupt not existing.
+
 On the ARM parts the node is identical across every drop seen:
 
 ```
