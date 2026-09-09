@@ -342,3 +342,59 @@ API's own comment on the auto-shutdown configuration says the
 protections are "the power up default", so the chip defends itself
 whether or not the driver programs `SSCFG`. What was missing was any way
 to learn that it had. Those bits are now logged and reported.
+
+### gen1 confirmed first-hand
+
+The first pass read the register map out of the AN7581 `pcm1.ko`, which
+is a gen2 part, and inferred gen1 from decompiled behaviour. The
+XN020-G3 US1 v3 drop closes that: it ships an EN7528 `pcm1.ko` and
+`pcm2.ko`, MIPS32r2, unstripped, with their own `regMap`.
+
+Seventeen entries, against forty-two on gen2:
+
+```
+pcmCtrl             0x00  0x1f7f1f1f  0x0500040a
+txTimeSlotCfg0..3   0x04..0x10  0x13ff13ff
+rxTimeSlotCfg0..3   0x14..0x20  0x13ff13ff
+ISR                 0x24  0x000007ff  0
+INTMask             0x28  0x000007ff  0
+txPolling           0x2c  0xffffffff  0
+rxPolling           0x30  0xffffffff  0
+txRingBaseAddr      0x34  0xffffffff  0
+rxRingBaseAddr      0x38  0xffffffff  0
+txrxRingSizeAndOff  0x3c  0x000000ff  0xc0
+txRxDMA             0x40  0x0000000f  0x0f000000
+```
+
+Every offset, mask and reset that the two generations share is
+identical, including `txrxRingSizeAndOff` resetting to `0xc0`. What gen1
+does not have is the twelve extra timeslot registers at 0x48..0xa4 and
+`txRxChanEnable` at 0xac. The table simply stops at `txRxDMA`.
+
+That is exactly the split the driver already implements: four timeslot
+registers covering eight channels on both generations, and the 0xac
+write guarded by `pcm_v2`. It is now confirmed rather than inferred.
+
+The descriptor difference is confirmed too. This module's `descGet`
+format string is
+
+```
+desc status:0x%08lx(ownership:%d,chvaild:0x%08x,sample size:%u)
+```
+
+with the channel-valid field the gen2 string does not have.
+
+### EN7528 is little-endian
+
+Every module in that drop, `pcm1.ko` and `pcm2.ko` included, is
+`ELF 32-bit LSB ... MIPS32 rel2`. This header describes gen1 as
+"EN751221, EN7528, MIPS BE", and the `EN75XX_PCM_DESC_CH_VALID`
+comment explains bits 23:16 as "byte 1 of the status word, which on
+big-endian MIPS is bits 23:16".
+
+The bit positions are right, but that reasoning is not: a `GENMASK(23,16)`
+field read through a `u32` is a hardware bit position and does not depend
+on byte order at all. The endianness that does matter is the sample byte
+order in the DMA buffers, which is what `airoha,pcm-big-endian` selects,
+and that stays a per-board property. What is now clear is that
+big-endian cannot be assumed for the whole gen1 generation.

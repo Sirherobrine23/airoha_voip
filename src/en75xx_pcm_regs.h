@@ -49,7 +49,7 @@
  *
  * IMPORTANT: the descriptor layout is NOT the same across generations.
  *
- *   gen1 (EN751221, EN7528, MIPS BE): stride 0x24 = 36 bytes.
+ *   gen1 (EN751221, EN7528, MIPS32r2): stride 0x24 = 36 bytes.
  *       pcmKmalloc(0x21c) = 540 = 15 * 36, rxDescSet() indexes
  *       ring + n * 0x24, descGet() dumps buf0..buf7 and the channel
  *       mask lives in status byte 1 (bits 23:16).
@@ -61,13 +61,22 @@
  *       and a single buffer pointer at +8; descGet() dumps only buf0.
  *       -> u32 status; u32 ch_valid; u32 buf_addr;
  *
- * The gen2 reading is corroborated by the AN7581 pcm1.ko, whose
- * descGet() format string is
+ * Both readings are corroborated by the vendor modules' own descGet()
+ * format strings. The AN7581 (gen2) module prints
  *
  *     desc status:0x%08lx(ownership:%d,sample size:%u)
  *
- * with no channel-mask field, against the gen1 string that also prints
- * "chvaild".
+ * and the EN7528 (gen1) module prints
+ *
+ *     desc status:0x%08lx(ownership:%d,chvaild:0x%08x,sample size:%u)
+ *
+ * The EN7528 module carries its own regMap, which stops at txRxDMA:
+ * gen1 has neither the twelve extra timeslot registers at 0x48..0xa4
+ * nor txRxChanEnable at 0xac, and every register the two generations
+ * share has the same offset, mask and reset. Note also that those
+ * EN7528 modules are little-endian MIPS, so big-endian cannot be
+ * assumed for the generation; see airoha,pcm-big-endian for the sample
+ * byte order, which is the only place it matters.
  *
  * Both generations have 15 descriptors per ring: the vendor index
  * arithmetic is "% 0xf" in both, and both allocations divide evenly.
