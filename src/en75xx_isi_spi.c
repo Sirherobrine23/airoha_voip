@@ -32,10 +32,29 @@
  * -- confirmed by decompiling that SoC's own vendor modules -- but has no
  * audio PLL block; see needs_audio_pll below.
  *
+ * Chip-SCU clock-source/pinmux routing (set_gpio_clocksrc() in the
+ * vendor's spi.ko/pcm1.ko) indexes a per-SoC chipScuReg[] table, so the
+ * register offsets differ by SoC even though the algorithm is identical.
+ * Both SoCs' table entries are now verified data, not inferred: EN7523's
+ * from that SoC's own spi.ko/pcm1.ko, and EN7528's from three independent
+ * binaries agreeing on both the algorithm and the raw chipScuReg bytes --
+ * this exact TP-Link XC220-G3v board's own spi_si32192.ko and pcm1.ko
+ * (chipScuReg entry 3, selected for GET_HIR()==0xb), plus the same
+ * algorithm confirmed a third time in an unrelated AN7581/VB430v spi.ko.
+ * See the en7523_isi_quirks/en7528_isi_quirks definitions below.
+ *
+ * EN7523 additionally sets one extra chip-SCU pinmux bit
+ * (pinmux_extra_set) that set_gpio_clocksrc() itself does not touch --
+ * observed in that SoC's own pcm1.ko init sequence, meaning unverified
+ * even there (never established what it actually does, only that the
+ * vendor writes it). No equivalent has been found for EN7528, so it is
+ * not carried over by assumption; en7528_isi_quirks leaves it at 0.
+ *
  * Only devNum 1 (a single ISI device) is wired up. A second device on
  * the same bus additionally ORs the chip-SCU DEV2 clock/pinmux bits into
- * the CHIP_SCU_CLKSRC/CHIP_SCU_PINMUX writes in en75xx_isi_spi_hw_init()
- * below; nothing here has been tested with two devices present.
+ * the chip_scu_clksrc_reg/chip_scu_pinmux_reg writes in
+ * en75xx_isi_spi_hw_init() below; nothing here has been tested with two
+ * devices present.
  */
 
 #include <linux/bits.h>
@@ -79,13 +98,25 @@
 #define  SYS_IFACE_MODE_MASK		GENMASK(3, 0)
 #define  SYS_IFACE_MODE_ISI		0xf
 
-/* Chip SCU (0x1fa20000): SLIC clock source and pin routing */
-#define CHIP_SCU_CLKSRC			0x214
-#define  CHIP_SCU_CLKSRC_MASK		0x003f3300u
-#define  CHIP_SCU_CLKSRC_GPIO_DEV1	0x00001000u
-#define CHIP_SCU_PINMUX			0x1d0
-#define  CHIP_SCU_PINMUX_MASK		0x00000c00u
-#define  CHIP_SCU_PINMUX_CLKOUT_EN	0x00000001u
+/*
+ * Chip SCU (0x1fa20000): SLIC clock source and pin routing, indexed from
+ * chipScuReg[] -- see the file header for provenance. Offsets differ per
+ * SoC (different table entry), the algorithm does not.
+ */
+#define EN7523_CHIP_SCU_CLKSRC		0x214
+#define EN7523_CHIP_SCU_CLKSRC_MASK	0x003f3300u
+#define EN7523_CHIP_SCU_GPIO_DEV1	0x00001000u
+#define EN7523_CHIP_SCU_PINMUX		0x1d0
+#define EN7523_CHIP_SCU_PINMUX_MASK	0x00000c00u
+/* pcm1.ko init: 0x1d0 |= 1 (clock-out gate?) -- see pinmux_extra_set */
+#define EN7523_CHIP_SCU_PINMUX_EXTRA	0x00000001u
+
+/* chipScuReg entry 3 (GET_HIR()==0xb), from this exact board's own spi_si32192.ko/pcm1.ko */
+#define EN7528_CHIP_SCU_CLKSRC		0x15c
+#define EN7528_CHIP_SCU_CLKSRC_MASK	0x001f4000u
+#define EN7528_CHIP_SCU_GPIO_DEV1	0x00080000u
+#define EN7528_CHIP_SCU_PINMUX		0x130
+#define EN7528_CHIP_SCU_PINMUX_MASK	0x00000c00u
 
 /*
  * Audio PLL fractional synthesizer, chip SCU, EN7523 only. This is what
@@ -117,22 +148,14 @@ struct en75xx_isi_spi {
 
 struct en75xx_isi_quirks {
 	bool needs_audio_pll;
-	/*
-	 * Whether CHIP_SCU_CLKSRC/CHIP_SCU_PINMUX (chip-SCU 0x214/0x1d0)
-	 * are the right registers at all. Verified true for EN7523 by
-	 * decompiling its own vendor spi.ko/pcm1.ko. EN7528 runs the same
-	 * vendor code path (set_gpio_clocksrc(), confirmed live: the stock
-	 * bootlog prints "gpio_clocksrc_init...ISI" and the chip answers),
-	 * but indexes a *different* chipScuReg table entry -- chipScuReg[0]
-	 * sits at chip-SCU 0x15c on EN7528 (matching this repo's own
-	 * REG_PON_I2C_MODE, en7528-voice.dtsi's pinctrl comment), not
-	 * 0x214, and the rest of that entry's fields (which bits, which
-	 * mask) were never decoded to the confidence this needs. Guessing
-	 * them and writing anyway is exactly the kind of thing this project
-	 * has repeatedly gotten burned by, so EN7528 leaves this step out
-	 * and warns instead -- see en75xx_isi_spi_hw_init().
-	 */
-	bool has_chip_scu_route;
+	/* chip_scu_clksrc_reg == 0 means "not known for this SoC yet" -- see
+	 * en75xx_isi_spi_hw_init(), which warns and skips rather than guess. */
+	u32 chip_scu_clksrc_reg;
+	u32 chip_scu_clksrc_mask;
+	u32 chip_scu_gpio_dev1;
+	u32 chip_scu_pinmux_reg;
+	u32 chip_scu_pinmux_mask;
+	u32 pinmux_extra_set;	/* EN7523-only; see file header, 0 elsewhere */
 };
 
 static int isi_start_apll(struct en75xx_isi_spi *isi)
@@ -269,14 +292,21 @@ static int en75xx_isi_spi_hw_init(struct en75xx_isi_spi *isi,
 			return ret;
 	}
 
-	if (quirks->has_chip_scu_route) {
-		ret = en75xx_scu_update(&isi->scu, CHIP_SCU_CLKSRC,
-					CHIP_SCU_CLKSRC_MASK,
-					CHIP_SCU_CLKSRC_GPIO_DEV1);
+	if (quirks->chip_scu_clksrc_reg) {
+		/*
+		 * ISI branch of set_gpio_clocksrc(): write(clksrc_reg,
+		 * (read & ~clksrc_mask) | gpio_dev1); write(pinmux_reg,
+		 * read & ~pinmux_mask), the latter ORed with the SoC's
+		 * extra bit (0 except on EN7523) since this driver only
+		 * ever takes the ISI path.
+		 */
+		ret = en75xx_scu_update(&isi->scu, quirks->chip_scu_clksrc_reg,
+					quirks->chip_scu_clksrc_mask,
+					quirks->chip_scu_gpio_dev1);
 		if (!ret)
-			ret = en75xx_scu_update(&isi->scu, CHIP_SCU_PINMUX,
-						CHIP_SCU_PINMUX_MASK | CHIP_SCU_PINMUX_CLKOUT_EN,
-						CHIP_SCU_PINMUX_CLKOUT_EN);
+			ret = en75xx_scu_update(&isi->scu, quirks->chip_scu_pinmux_reg,
+						quirks->chip_scu_pinmux_mask | quirks->pinmux_extra_set,
+						quirks->pinmux_extra_set);
 		if (ret)
 			return dev_err_probe(isi->dev, ret,
 					     "cannot route the SLIC clock source\n");
@@ -389,12 +419,21 @@ static int en75xx_isi_spi_probe(struct platform_device *pdev)
 
 static const struct en75xx_isi_quirks en7523_isi_quirks = {
 	.needs_audio_pll = true,
-	.has_chip_scu_route = true,
+	.chip_scu_clksrc_reg = EN7523_CHIP_SCU_CLKSRC,
+	.chip_scu_clksrc_mask = EN7523_CHIP_SCU_CLKSRC_MASK,
+	.chip_scu_gpio_dev1 = EN7523_CHIP_SCU_GPIO_DEV1,
+	.chip_scu_pinmux_reg = EN7523_CHIP_SCU_PINMUX,
+	.chip_scu_pinmux_mask = EN7523_CHIP_SCU_PINMUX_MASK,
+	.pinmux_extra_set = EN7523_CHIP_SCU_PINMUX_EXTRA,
 };
 
 static const struct en75xx_isi_quirks en7528_isi_quirks = {
 	.needs_audio_pll = false,
-	.has_chip_scu_route = false,
+	.chip_scu_clksrc_reg = EN7528_CHIP_SCU_CLKSRC,
+	.chip_scu_clksrc_mask = EN7528_CHIP_SCU_CLKSRC_MASK,
+	.chip_scu_gpio_dev1 = EN7528_CHIP_SCU_GPIO_DEV1,
+	.chip_scu_pinmux_reg = EN7528_CHIP_SCU_PINMUX,
+	.chip_scu_pinmux_mask = EN7528_CHIP_SCU_PINMUX_MASK,
 };
 
 static const struct of_device_id en75xx_isi_spi_of_match[] = {
