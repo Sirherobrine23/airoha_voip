@@ -25,7 +25,8 @@ probes will arm its DMA against a SLIC that is not there.
 | `airoha,tx-slot-config`        | no       | 4 × u32, two slots per word                                                            |
 | `airoha,rx-slot-config`        | no       | same                                                                                   |
 | `airoha,dma-channel-mask`      | no       | gen1 supports `0xff`, EN7523 supports `0x0f`; configure all channels a board may open  |
-| `airoha,pcm-big-endian`        | no       | swap 16-bit samples in the DMA buffer                                                  |
+| `airoha,pcm-big-endian`        | no       | swap byte order within each 16-bit sample                                             |
+| `airoha,pcm-swap-samples`      | no       | swap the order of the two samples packed in each 32-bit DMA word (EN7528 gen1)        |
 
 ## Ownership of SCU resources
 

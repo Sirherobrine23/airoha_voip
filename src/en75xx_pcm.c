@@ -85,7 +85,8 @@ struct en75xx_pcm_dev {
 	u8 dma_channel_mask;
 	u8 active_mask;
 	bool running;
-	bool big_endian_samples;
+	bool big_endian_samples;	/* byte order within each 16-bit sample */
+	bool swap_samples;		/* order of samples within each 32-bit DMA word */
 	u64 dma_errors;
 };
 
@@ -233,6 +234,18 @@ static void en75xx_pcm_fill_tx_channel(struct en75xx_pcm_dev *pcm,
 
 		for (i = 0; i < EN75XX_PCM_FRAME_BYTES; i += 2)
 			swap(dst[i], dst[i + 1]);
+	} else if (pcm->swap_samples) {
+		/*
+		 * EN7528's gen1 PCM DMA packs two 16-bit linear samples per
+		 * 32-bit word in reverse chronological order on this SoC.
+		 * Swapping the pair here restores playback order; see
+		 * en75xx_pcm_push_rx_channel() for the matching RX unswap.
+		 */
+		u16 *s = (u16 *)dst;
+		unsigned int i;
+
+		for (i = 0; i < EN75XX_PCM_FRAME_SAMPLES; i += 2)
+			swap(s[i], s[i + 1]);
 	}
 	wake_up_interruptible(&ch->tx_wait);
 }
@@ -267,6 +280,15 @@ static void en75xx_pcm_push_rx_channel(struct en75xx_pcm_dev *pcm,
 		for (i = 0; i < EN75XX_PCM_FRAME_BYTES; i += 2) {
 			tmp[i] = src[i + 1];
 			tmp[i + 1] = src[i];
+		}
+		data = tmp;
+	} else if (pcm->swap_samples) {
+		const u16 *s = (const u16 *)src;
+		u16 *d = (u16 *)tmp;
+
+		for (i = 0; i < EN75XX_PCM_FRAME_SAMPLES; i += 2) {
+			d[i] = s[i + 1];
+			d[i + 1] = s[i];
 		}
 		data = tmp;
 	}
@@ -833,6 +855,8 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 				       EN75XX_PCM_SLOT_REGS);
 	pcm->big_endian_samples = device_property_read_bool(dev,
 						    "airoha,pcm-big-endian");
+	pcm->swap_samples = device_property_read_bool(dev,
+						    "airoha,pcm-swap-samples");
 
 	ret = dma_set_mask_and_coherent(dev, pcm->soc->dma_mask);
 	if (ret)
