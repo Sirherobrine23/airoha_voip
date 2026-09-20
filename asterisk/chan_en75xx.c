@@ -100,6 +100,12 @@ struct en75xx_pvt {
 	unsigned int immediate:1;
 	unsigned int hwdtmf:1;		/* trust the SLIC for DTMF */
 	unsigned int inuse:1;
+	int dialtone_volume;		/* ast_playtones_start() amplitude for dial tone */
+	int callprogress_volume;	/* same, for busy/congestion/ring */
+
+	/* 400 Hz dial-tone notch filter state, used only while dialing */
+	int16_t notch_x1, notch_x2;
+	int16_t notch_y1, notch_y2;
 };
 
 static struct en75xx_pvt lines[EN75XX_MAX_LINES];
@@ -142,8 +148,16 @@ static struct ast_channel_tech en75xx_tech = {
 /*
  * Tones come from the channel's tone zone (indications.conf), so a
  * Brazilian zone gets Brazilian dial tone without touching this file.
+ *
+ * Dial tone plays continuously from off-hook until the first recognized
+ * digit, so it reflects across the 2-wire hybrid into the mic path for the
+ * whole time the line is off-hook and idle. Asterisk's own default
+ * amplitude (vol <= 0, 7219 == -8dBm full scale) makes that reflection
+ * loud enough to raise the DTMF detector's total-energy floor and miss the
+ * first digit on a hybrid with mediocre return loss. play_tone_vol() lets
+ * dial tone run quieter than other indications without changing them.
  */
-static int play_tone(struct ast_channel *chan, const char *name)
+static int play_tone_vol(struct ast_channel *chan, const char *name, int vol)
 {
 	struct ast_tone_zone_sound *ts;
 	int res;
@@ -154,9 +168,16 @@ static int play_tone(struct ast_channel *chan, const char *name)
 		return -1;
 	}
 
-	res = ast_playtones_start(chan, 0, ts->data, 0);
+	res = ast_playtones_start(chan, vol, ts->data, 0);
 	ts = ast_tone_zone_sound_unref(ts);
 	return res;
+}
+
+static int play_tone(struct ast_channel *chan, const char *name)
+{
+	struct en75xx_pvt *p = ast_channel_tech_pvt(chan);
+
+	return play_tone_vol(chan, name, p->callprogress_volume);
 }
 
 /* ------------------------------------------------------------------ */
@@ -279,7 +300,10 @@ static void *ss_thread(void *data)
 	ast_verb(3, "%s: off-hook, collecting digits in context '%s'\n",
 		 p->device, p->context);
 
-	if (play_tone(chan, "dial"))
+	p->notch_x1 = p->notch_x2 = 0;
+	p->notch_y1 = p->notch_y2 = 0;
+
+	if (play_tone_vol(chan, "dial", p->dialtone_volume))
 		ast_log(LOG_WARNING, "%s: no dial tone\n", p->device);
 
 	for (;;) {
@@ -692,8 +716,41 @@ static struct ast_frame *en75xx_read(struct ast_channel *ast)
 	 * ast_dsp_process rewrites the frame into an AST_FRAME_DTMF
 	 * when it finds one, which is what ast_waitfordigit consumes.
 	 */
-	if (p->dsp && !p->hwdtmf)
+	if (p->dsp && !p->hwdtmf) {
+		if (p->state == EN75XX_DIALING) {
+			/*
+			 * Notch out the reflected dial tone before handing
+			 * the frame to the DTMF detector -- see the comment
+			 * on play_tone_vol() for why the reflection is there
+			 * at all. Q14 biquad notch, 400 Hz at 8 kHz, Q=3.0;
+			 * bypassed once dialing ends, so voice on an active
+			 * call is never touched.
+			 */
+			int16_t *samp = (int16_t *)(p->buf + AST_FRIENDLY_OFFSET);
+			const int32_t b0 = 15582, b1 = -29638, b2 = 15582;
+			const int32_t a1 = -29638, a2 = 14779;
+			int i;
+
+			for (i = 0; i < EN75XX_FRAME_SAMPLES; i++) {
+				int32_t x0 = samp[i];
+				int32_t acc = b0 * x0 + b1 * (int32_t)p->notch_x1 + b2 * (int32_t)p->notch_x2
+					    - a1 * (int32_t)p->notch_y1 - a2 * (int32_t)p->notch_y2;
+				int32_t y0 = acc >> 14;
+
+				if (y0 > 32767)
+					y0 = 32767;
+				else if (y0 < -32768)
+					y0 = -32768;
+
+				p->notch_x2 = p->notch_x1;
+				p->notch_x1 = x0;
+				p->notch_y2 = p->notch_y1;
+				p->notch_y1 = y0;
+				samp[i] = (int16_t)y0;
+			}
+		}
 		f = ast_dsp_process(ast, p->dsp, f);
+	}
 
 	return f;
 }
@@ -922,6 +979,8 @@ static int load_config(int reload)
 			 p->index);
 		ast_copy_string(p->context, "default", sizeof(p->context));
 		ast_copy_string(p->exten, "s", sizeof(p->exten));
+		p->dialtone_volume = 1000;
+		p->callprogress_volume = 800;
 
 		for (v = ast_variable_browse(cfg, cat); v; v = v->next) {
 			if (!strcasecmp(v->name, "device"))
@@ -948,6 +1007,10 @@ static int load_config(int reload)
 				p->immediate = ast_true(v->value);
 			else if (!strcasecmp(v->name, "hardware_dtmf"))
 				p->hwdtmf = ast_true(v->value);
+			else if (!strcasecmp(v->name, "dialtone_volume"))
+				p->dialtone_volume = atoi(v->value);
+			else if (!strcasecmp(v->name, "callprogress_volume"))
+				p->callprogress_volume = atoi(v->value);
 			else
 				ast_log(LOG_WARNING,
 					"[%s]: unknown option '%s'\n", cat,

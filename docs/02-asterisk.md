@@ -67,6 +67,26 @@ Matches the `chan_dahdi` defaults: 16 s for the first digit, 8 s between
 digits, and 3 s after a match when a longer extension could still match,
 so a dialplan with both `1` and `100` behaves sanely.
 
+## Dial tone volume vs. DTMF detection
+
+Dial tone plays continuously from off-hook until the first recognized
+digit, so on a hybrid with mediocre return loss it reflects into the mic
+path for as long as the line sits off-hook and idle. At Asterisk's default
+full-scale amplitude that reflection can raise the DTMF detector's
+total-energy floor enough to miss the first digit. `dialtone_volume` and
+`callprogress_volume` in `en75xx.conf` (see the sample) let dial tone run
+quieter than busy/congestion/ring without touching indications.conf or
+Asterisk core. The shipped defaults are a starting point, not a
+calibrated value; retune per hybrid if dialing is unreliable.
+
+While `state == EN75XX_DIALING`, `en75xx_read()` also runs incoming audio
+through a fixed 400 Hz notch (the frequency Asterisk's own default `dial`
+tone data uses) before handing it to `ast_dsp_process()`, to strip
+whatever dial-tone reflection survives the lower volume. The filter is
+bypassed once dialing ends, so it never touches voice on an active call.
+If a zone's dial tone uses a different frequency, the notch coefficients
+need retuning to match.
+
 ## Installing
 
 ```
