@@ -84,8 +84,13 @@ typedef uInt32 ramData;
 #else
 #include <linux/slab.h>
 #include <linux/kernel.h> /* for abs() */
-/* NOTE: kcalloc was introduced in ~2.6.14, otherwise use kzalloc() with (X)*(Y) for the block size */
-#define SIVOICE_CALLOC(X,Y)   kcalloc((X),(Y), GFP_KERNEL)
+/*
+ * The ProSLIC API uses SIVOICE_CALLOC(size, count), while Linux kcalloc()
+ * takes (count, size).  Keep the vendor-facing convention here and translate
+ * it at the kernel allocation boundary.
+ */
+#define SIVOICE_CALLOC(SIZE, COUNT) \
+	kcalloc((COUNT), (SIZE), GFP_KERNEL)
 #define SIVOICE_FREE(X)       kfree((X))
 #define SIVOICE_MALLOC(X)     kmalloc((X), GFP_KERNEL)
 #define SIVOICE_STRCPY        strcpy

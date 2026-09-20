@@ -37,7 +37,11 @@ endef
 
 ASTERISK_DIR:=$(STAGING_DIR)/usr/include/asterisk
 # The UAPI header travels with the module so the two cannot drift apart.
-UAPI_DIR:=$(TOPDIR)/package/kernel/en75xx-voip/include/uapi/linux
+# Prefer the copy made by tools/install-openwrt.sh; when this repository is
+# consumed directly as a src-link feed, fall back to the project-root header.
+EN75XX_VOIP_PROJECT_DIR:=$(realpath $(CURDIR)/../../..)
+EN75XX_VOIP_INSTALLED_UAPI:=$(TOPDIR)/package/kernel/en75xx-voip/include/uapi/linux
+UAPI_DIR:=$(if $(wildcard $(EN75XX_VOIP_INSTALLED_UAPI)/en75xx_voice.h),$(EN75XX_VOIP_INSTALLED_UAPI),$(EN75XX_VOIP_PROJECT_DIR)/include/uapi/linux)
 
 TARGET_CFLAGS += \
 	-I$(STAGING_DIR)/usr/include \

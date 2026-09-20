@@ -8,7 +8,18 @@ PKG_RELEASE:=1
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=Sirherobrine23
 
+include $(INCLUDE_DIR)/kernel.mk
 include $(INCLUDE_DIR)/package.mk
+
+# The package can be consumed in two ways:
+#  1. tools/install-openwrt.sh copies src/include/vendor/firmware here; or
+#  2. the repository itself is used as an OpenWrt src-link feed.
+#
+# In the second case GNU make resolves the package/feeds symlink before setting
+# CURDIR, so walking four directories up from this Makefile reaches the project
+# root (openwrt/package/kernel/en75xx-voip -> project root).
+EN75XX_VOIP_SOURCE_DIR:=$(if $(wildcard $(CURDIR)/src/Makefile),$(CURDIR),$(realpath $(CURDIR)/../../../..))
+
 include ./firmware.mk
 
 define KernelPackage/en75xx-pcm
@@ -78,10 +89,12 @@ endef
 # The blobs live next to the sources so the converter output and the
 # packaged firmware cannot drift apart.
 define Build/Prepare
-	mkdir -p $(PKG_BUILD_DIR)
-	$(CP) ./src/. $(PKG_BUILD_DIR)/
-	$(CP) ./include $(PKG_BUILD_DIR)/../include
-	$(CP) ./vendor $(PKG_BUILD_DIR)/../vendor
+	test -f $(EN75XX_VOIP_SOURCE_DIR)/src/Makefile || \
+		{ echo "EN75xx VoIP source tree not found: $(EN75XX_VOIP_SOURCE_DIR)" >&2; exit 1; }
+	mkdir -p $(PKG_BUILD_DIR) $(PKG_BUILD_DIR)/../include $(PKG_BUILD_DIR)/../vendor
+	$(CP) $(EN75XX_VOIP_SOURCE_DIR)/src/. $(PKG_BUILD_DIR)/
+	$(CP) $(EN75XX_VOIP_SOURCE_DIR)/include/. $(PKG_BUILD_DIR)/../include/
+	$(CP) $(EN75XX_VOIP_SOURCE_DIR)/vendor/. $(PKG_BUILD_DIR)/../vendor/
 endef
 
 DXS_SRC_DIR:=$(PKG_BUILD_DIR)/../vendor/maxlinear/drv_tapi_dxs-1.0.0.0
