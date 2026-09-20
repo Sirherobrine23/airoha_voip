@@ -40,4 +40,9 @@ define Package/en75xx-dxs-firmware/install
 	$(INSTALL_DIR) $(1)/lib/firmware/airoha-voice
 	$(INSTALL_DATA) ./firmware/dxs/DXS_FW.bin $(1)/lib/firmware/airoha-voice/
 	$(INSTALL_DATA) ./firmware/dxs/DXS_BBD.bin $(1)/lib/firmware/airoha-voice/
+	$(INSTALL_DIR) $(1)/lib/firmware/voice
+	$(LN) /lib/firmware/airoha-voice/DXS_FW.bin \
+		$(1)/lib/firmware/voice/dxs_firmware.bin
+	$(LN) /lib/firmware/airoha-voice/DXS_BBD.bin \
+		$(1)/lib/firmware/voice/dxs_bbd.bin
 endef

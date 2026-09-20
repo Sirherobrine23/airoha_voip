@@ -55,6 +55,20 @@ define KernelPackage/en75xx-slic-si3219x/description
  Si32192 used on the TP-Link XX230v and XC220-G3v boards.
 endef
 
+define KernelPackage/en75xx-slic-dxs-cibb12
+  SUBMENU:=Voice over IP
+  TITLE:=MaxLinear PEF32001/PEF32002 TAPI (CIBB12)
+  DEPENDS:=+kmod-en75xx-pcm +en75xx-dxs-firmware
+  FILES:=$(PKG_BUILD_DIR)/dxs-build/src/drv_tapi_dxs.ko
+endef
+
+define KernelPackage/en75xx-slic-dxs-cibb12/description
+ MaxLinear standalone TAPI driver for the PEF32001/DXS101 and
+ PEF32002/DXS102, compiled specifically for the CIBB12 converter topology.
+ It is intentionally not autoloaded: firmware, BBD, reset polarity and PCM
+ slots must be selected from the board design before starting the line.
+endef
+
 # The blobs live next to the sources so the converter output and the
 # packaged firmware cannot drift apart.
 define Build/Prepare
@@ -64,12 +78,37 @@ define Build/Prepare
 	$(CP) ./vendor $(PKG_BUILD_DIR)/../vendor
 endef
 
+DXS_SRC_DIR:=$(PKG_BUILD_DIR)/../vendor/maxlinear/drv_tapi_dxs-1.0.0.0
+DXS_BUILD_DIR:=$(PKG_BUILD_DIR)/dxs-build
+DXS_SELECTED:=$(CONFIG_PACKAGE_kmod-en75xx-slic-dxs-cibb12)
+
+define Build/Configure
+	$(call Build/Configure/Default)
+	$(if $(DXS_SELECTED),mkdir -p $(DXS_BUILD_DIR))
+	$(if $(DXS_SELECTED),(cd $(DXS_BUILD_DIR); \
+		$(TARGET_CONFIGURE_OPTS) \
+		ARCH=$(LINUX_KARCH) \
+		$(DXS_SRC_DIR)/configure \
+			--build=$(GNU_HOST_NAME) \
+			--host=$(GNU_TARGET_NAME) \
+			--target=$(GNU_TARGET_NAME) \
+			--with-kernel-incl=$(LINUX_DIR) \
+			--with-kernel-build=$(LINUX_DIR) \
+			--with-kernel-module \
+			--enable-tapi3 \
+			--enable-kernel-api \
+			--enable-dcdc-hw=CIBB12 \
+			--with-max-devices=4))
+endef
+
 define Build/Compile
 	+$(KERNEL_MAKE) M=$(PKG_BUILD_DIR) modules
+	$(if $(DXS_SELECTED),$(MAKE) $(PKG_JOBS) -C $(DXS_BUILD_DIR))
 endef
 
 $(eval $(call KernelPackage,en75xx-pcm))
 $(eval $(call KernelPackage,en75xx-slic-le9642))
 $(eval $(call KernelPackage,en75xx-slic-si3219x))
+$(eval $(call KernelPackage,en75xx-slic-dxs-cibb12))
 $(eval $(call BuildPackage,en75xx-proslic-firmware))
 $(eval $(call BuildPackage,en75xx-dxs-firmware))

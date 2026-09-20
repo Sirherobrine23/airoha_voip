@@ -18,6 +18,7 @@ src/en75xx_slic_le9642.c  Microsemi Le9641/Le9642 over ZSI
 src/en75xx_slic_si3219x.c Skyworks Si3218x/Si3219x over SPI
 src/en75xx_proslic_fw.c ProSLIC patch firmware loader
 tools/proslic-patch2fw.py  patch .c -> firmware blob converter
+tools/voip-ko-recovery.py  pin/compare ELF evidence from vendor VoIP modules
 asterisk/chan_en75xx.c  Asterisk channel driver (type EN75XX)
 vendor/proslic/         Skyworks ProSLIC API + Si3219x patch
 vendor/vp886/           Microsemi VoicePath API-II (reference)
@@ -33,17 +34,17 @@ voice stack. The code now reflects the recovered register/descriptor
 layouts and the current kernel pinctrl/reset/clock providers, but it
 still needs per-board electrical and runtime validation.
 
-| Piece | State |
-|-------|-------|
-| PCM register map | confirmed against the vendor `pcm1.ko` regMap; see `docs/07` |
-| PCM gen1 (EN751221/EN7528) | implemented from vendor layout; bench validation required |
-| PCM gen2 (EN7523) | corrected to 12-byte descriptors and `CHAN_ENABLE`; hardware validation required |
-| G.711 and `/dev/en75xx-fxsN` | kernel-reference companding and endian paths corrected; integration test required |
-| ZSI transport | EN751221 legacy sequence retained explicitly; modern EN7523 resources wired, runtime validation required |
-| Le9642: profiles, slots, feed, ring cadence, hook | profiles and timeslot handling now match the vendor API; bench validation required |
-| Si3219x adapter | experimental SPI adapter; Si32192/Si32193 require the missing ISI transport and their known compatibles are rejected |
-| MaxLinear PEF32001/PEF32002 (DUSLIC-XS) | not started; firmware blobs identified |
-| Asterisk channel driver | draft implementation; build/runtime testing against the target Asterisk version required |
+| Piece                                             | State                                                                                                                |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| PCM register map                                  | confirmed against the vendor `pcm1.ko` regMap; see `docs/07`                                                         |
+| PCM gen1 (EN751221/EN7528)                        | implemented from vendor layout; bench validation required                                                            |
+| PCM gen2 (EN7523)                                 | corrected to 12-byte descriptors and `CHAN_ENABLE`; hardware validation required                                     |
+| G.711 and `/dev/en75xx-fxsN`                      | kernel-reference companding and endian paths corrected; integration test required                                    |
+| ZSI transport                                     | EN751221 legacy sequence retained explicitly; modern EN7523 resources wired, runtime validation required             |
+| Le9642: profiles, slots, feed, ring cadence, hook | profiles and timeslot handling now match the vendor API; bench validation required                                   |
+| Si3219x adapter                                   | experimental SPI adapter; Si32192/Si32193 require the missing ISI transport and their known compatibles are rejected |
+| MaxLinear PEF32001/PEF32002 (DUSLIC-XS)           | official GPL driver imported; CIBB12/R600 BBD identified; EN75xx voice bridge and hardware validation pending        |
+| Asterisk channel driver                           | draft implementation; build/runtime testing against the target Asterisk version required                             |
 
 ## Two SLIC families, two transports
 
@@ -58,7 +59,7 @@ parts are ordinary SPI devices and use the Linux SPI subsystem.
 
 ZSI adds two PCLK cycles of delay on the transmit side. The Microchip
 API compensates by programming the transmit timeslot one byte slot
-*below* the wanted bus slot and letting the device profile's clock-slot
+_below_ the wanted bus slot and letting the device profile's clock-slot
 field add six clocks back, which nets the −2 that cancels the delay.
 
 Leave the shift out and transmit audio is exactly one byte late. That
@@ -76,7 +77,7 @@ data path and the character device stays 16-bit linear either way.
 
 The SLIC's `TXSLOT`/`RXSLOT` is a PCM **bus** timeslot; the DMA engine
 numbers channels. The two are related only by the PCM engine's timeslot
-table, whose slot field is a *bit offset into the frame*, so there is no
+table, whose slot field is a _bit offset into the frame_, so there is no
 fixed formula. With this driver's default table channel n sits at bit
 offset 32 + n·16, that is at bus slot 4 + n·2, so slots 4 and 6 are DMA
 channels 0 and 1.
@@ -112,8 +113,10 @@ selected.
 ## Firmware
 
 `firmware/dxs/` holds `DXS_FW.bin` and `DXS_BBD.bin`, recovered from a
-Nokia G-240G-E. The PRAM patch is optional (the DUSLIC-XS falls back to
-its ROM firmware); the BBD is not.
+Nokia G-240G-E. The BBD was matched byte-for-byte to MaxLinear's
+`dcdc_CIBB12/R600.bin`; it must not be treated as a generic DXS profile.
+The PRAM patch is optional (the DUSLIC-XS falls back to its ROM firmware),
+but the BBD is not. See `firmware/dxs/README.md` and `docs/09-*`.
 
 `firmware/proslic/` holds 19 ProSLIC DSP patches converted from the API
 C sources by `tools/proslic-patch2fw.py`, covering Si3217x/18x/19x/26x/28x
@@ -141,5 +144,7 @@ source files.
 8. `docs/07-gpl-sdk-crosscheck.md` — what the Airoha LTS SDK sources
    shipped in the TP-Link VB430 GPL drop confirmed, and what they
    contradicted.
+9. `docs/10-mips-voip-ko-recovery.*.md` — the MIPS EN7528 module ABI,
+   PCM1/PCM2 relationship, and the reproducible recovery workflow.
 
 Lifecycle and firmware review: [English](docs/08-proslic-review.en-US.md) / [Português](docs/08-proslic-review.pt-BR.md).

@@ -1,0 +1,93 @@
+* Lantiq DUSLIC XS driver
+
+Modified in 2026 to document standard reset properties and MaxLinear PEF
+compatible strings while retaining the legacy binding.
+
+Node describing DUSLIC XS platform SPI device
+
+Required properties:
+- compatible: one of "maxlinear,pef32001", "maxlinear,pef32002" or the
+              legacy "lantiq,duslicxs"
+- reg: SPI chip select line number the DUSLIC XS is attached to
+- spi-max-frequency: the maximum SPI frequency used by the master, limit to 8MHz
+- spi-cpha: required to set SPI mode 3
+- spi-cpol: required to set SPI mode 3
+- pinctrl-names: must be equal to "default"
+- pinctrl-0: reference to pincontrol defining how and which
+             pins to use for the SPI CS (chip select)
+
+Optional properties:
+- interrupts: interrupt number the DUSLIC XS is attached to.
+- interrupt-parent: reference to the parent interrupt controller
+- reset-gpios: reference to GPIO used for DUSLIC XS reset
+- reset-interval-ms: interval of reset in milliseconds, must be set
+                        when "reset-gpios" is defined.
+                        Valid range: 5-500ms.
+
+The legacy properties "intel,reset-gpios" and "intel,reset-interval" remain
+accepted for compatibility with existing device trees.
+
+Note:
+- if "interrupts" and "interrupt-parent" properties are not defined,
+  DUSLIC XS can still be run in polling mode
+
+Example:
+	dxs0: dxs@0 {
+		status = "okay";
+		compatible = "maxlinear,pef32001";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+		spi-cpha;
+		spi-cpol;
+		interrupt-parent = <&gpio1>;
+		interrupts = <8 8>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_spi1_cs0>;
+		reset-gpios = <&gpio0 18 GPIO_ACTIVE_HIGH>;
+		reset-interval-ms = <10>;
+	};
+
+	dxs1: dxs@2 {
+		status = "okay";
+		compatible = "lantiq,duslicxs";
+		reg = <2>;
+		spi-max-frequency = <8000000>;
+		spi-cpha;
+		spi-cpol;
+		interrupt-parent = <&gpio1>;
+		interrupts = <8 8>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_spi1_cs2>;
+		intel,reset-gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+		intel,reset-interval = <10>;
+	};
+
+	dxs2: dxs@1 {
+		status = "okay";
+		compatible = "lantiq,duslicxs";
+		reg = <1>;
+		spi-max-frequency = <8000000>;
+		spi-cpha;
+		spi-cpol;
+		interrupt-parent = <&gpio1>;
+		interrupts = <8 8>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_spi1_cs1>;
+		intel,reset-gpios = <&gpio_rst 14 GPIO_ACTIVE_HIGH>;
+		intel,reset-interval = <10>;
+	};
+
+	dxs3: dxs@4 {
+		status = "okay";
+		compatible = "lantiq,duslicxs";
+		reg = <4>;
+		spi-max-frequency = <8000000>;
+		spi-cpha;
+		spi-cpol;
+		interrupt-parent = <&gpio1>;
+		interrupts = <8 8>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_spi1_cs4>;
+		intel,reset-gpios = <&gpio_rst 15 GPIO_ACTIVE_HIGH>;
+		intel,reset-interval = <10>;
+	};

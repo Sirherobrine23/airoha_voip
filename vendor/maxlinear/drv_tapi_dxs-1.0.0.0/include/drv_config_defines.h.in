@@ -1,0 +1,151 @@
+/* include/drv_config_defines.h.in.  Generated from configure.ac by autoheader.  */
+
+/******************************************************************************
+
+  Copyright 2023-2024 MaxLinear, Inc.
+
+  For licensing information, see the file 'LICENSE' in the root folder of
+  this software module.
+
+******************************************************************************/
+
+#ifndef _DRV_TAPI_DXS_CONFIG_DEFINES_H_
+#define _DRV_TAPI_DXS_CONFIG_DEFINES_H_
+
+
+/* keep TAPI ioctl API compatible with classic TAPI driver */
+#undef CLASSIC_TAPI_COMPATIBLE
+
+/* Build in debugging symbols and enable debugging messages */
+#undef DEBUG
+
+/* configure options string */
+#undef DRV_TAPI_CONFIGURE_STR
+
+/* Define the DC/DC converter type of the target HW. */
+#undef DXS_DCDC_TYPE
+
+/* enable direct chip access support */
+#undef DXS_DIRECT_CHIP_ACCESS_SUPPORT
+
+/* enable interrupts */
+#undef DXS_HAVE_INTERRUPTS
+
+/* Maximum DUSLIC XS devices to support */
+#undef DXS_MAX_DEVICES
+
+/* DUSLIC XS SPI 8-bit access */
+#undef DXS_SPI_8BIT_ACCESS
+
+/* enable compensation of tone levels with analog line gains */
+#undef DXS_TONE_GENERATOR_LEVEL_COMPENSATION
+
+/* Enable TAPI debug buffer feature */
+#undef ENABLE_TAPI_DEBUG_BUFFER
+
+/* enable trace outputs in general */
+#undef ENABLE_TRACE
+
+/* enable event logger debugging */
+#undef EVENT_LOGGER_DEBUG
+
+/* Define to 1 if ifxos should be enabled. */
+#undef HAVE_LIBIFXOS
+
+/* Use IFXOS library */
+#undef IFXOS_ENABLED
+
+/* enable Linux SMP support */
+#undef LINUX_SMP_SUPPORT
+
+/* Name of package */
+#undef PACKAGE
+
+/* Define to the address where bug reports for this package should be sent. */
+#undef PACKAGE_BUGREPORT
+
+/* Define to the full name of this package. */
+#undef PACKAGE_NAME
+
+/* Define to the full name and version of this package. */
+#undef PACKAGE_STRING
+
+/* Define to the one symbol short name of this package. */
+#undef PACKAGE_TARNAME
+
+/* Define to the home page for this package. */
+#undef PACKAGE_URL
+
+/* Define to the version of this package. */
+#undef PACKAGE_VERSION
+
+/* enable TAPI Calibration support */
+#undef TAPI_CALIBRATION
+
+/* enable capacitance measurement services */
+#undef TAPI_CAPACITANCE_MEASUREMENT_SUPPORT
+
+/* enable TAPI CID support */
+#undef TAPI_CID
+
+/* enable TAPI Analog Line Continuous Measurement */
+#undef TAPI_CONT_MEASUREMENT
+
+/* Maximum TAPI debug buffer entries */
+#undef TAPI_DEBUG_BUFFER_NUM_OF_ENTRIES
+
+/* enable TAPI pulse dial/hook support */
+#undef TAPI_DIAL
+
+/* enable TAPI DTMF support */
+#undef TAPI_DTMF
+
+/* enable TAPI GR909 support */
+#undef TAPI_GR909
+
+/* enable TAPI Hook state machine */
+#undef TAPI_HOOKSTATE
+
+/* enable Kernel API */
+#undef TAPI_KERNEL_API_SUPPORT
+
+/* enable TAPI METERING support */
+#undef TAPI_METERING
+
+/* enable TAPI MWL support */
+#undef TAPI_MWL
+
+/* enable TAPI Network Line Testing services */
+#undef TAPI_NLT
+
+/* enable PCM channel support */
+#undef TAPI_PCM_SUPPORT
+
+/* enable FXS Phone Detection support */
+#undef TAPI_PHONE_DETECTION
+
+/* adapt the duration for each bit in the ring cadence to the configured
+   ring-period */
+#undef TAPI_RING_ADAPTIVE_BITTIME
+
+/* enable TAPI ring engine support */
+#undef TAPI_RING_ENGINE
+
+/* strict io file permissions */
+#undef TAPI_STRICT_PERMISSIONS
+
+/* enable tone generator feature */
+#undef TAPI_TONE_GENERATOR_SUPPORT
+
+/* enable use of proc filesystem entries (Linux only) */
+#undef TAPI_USE_PROC
+
+/* Version number of package */
+#undef VERSION
+
+/* environment and device specific CFLAGS passed to configure */
+#undef WITH_CLFAGS_CONFIGURE_OPTION
+
+
+#endif /* _DRV_TAPI_DXS_CONFIG_DEFINES_H_ */
+

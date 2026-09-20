@@ -1,0 +1,61 @@
+-------------------------------------------------------------------------------
+version  1.0.0.0  |  2024-09-11  |
+-------------------------------------------------------------------------------
+FIX Remove unused TAPI ring set cadence. Add missing mutex release in case of
+    pTxData null pointer.
+CHG Move classic TAPI compatibility symbol to separate header file to avoid
+    include of drv_tapi_config.h when external applications/libraries use
+    drv_tapi_io.h file. [VOICECPE_SW-2630]
+CHG Deactivate tone generator level compensation by default. [VOICECPE_SW-2654]
+CHG Improve README file content. [VOICECPE_SW-2630]
+CHG Add register number to TAPI debug buffer logs. [VOICECPE_SW-2647]
+CHG Add initialization checkpoints to TAPI debug buffer log. [VOICECPE_SW-2647]
+FIX Event logger integration. [VOICECPE_SW-2630]
+
+-------------------------------------------------------------------------------
+version  0.9.1.0  |  2024-06-27  |
+-------------------------------------------------------------------------------
+FIX IOCTL indexes/handlers mismatch when CLASSIC_TAPI_COMPATIBLE switch is not
+    defined. [VOICECPE_SW-2671]
+NEW Add support for BBD V2 to handle CIB DC/DC type. [VOICECPE_SW-2663]
+FIX Capacity measurements feature must be enabled in order to use phone
+    detection functionality. Set DXS capacity measurements feature implicitly
+    in case PPD is enabled. [VOICECPE_SW-2664]
+NEW Add specific error number for automatic calibration timeout.
+    [VOICECPE_SW-2630]
+CHG Remove DXS_statusIfxError error code usage which leads to misleading error
+    string resolution and use DXS_statusErr instead. [VOICECPE_SW-2630]
+FIX Use after free bug when RETURN_STATUS/RETURN_DEVSTATUS tries to report an
+    error after TAPI device un-registration is done. [VOICECPE_SW-2665]
+
+-------------------------------------------------------------------------------
+version  0.9.0.0  |  2024-04-17  |
+-------------------------------------------------------------------------------
+CHG The level of tones played into local direction is automatically corrected
+    with the attenuation which is configured in the BBD file for the local
+    direction. As result the level of tones on the analog line is defined
+    only by the tone configuration and independent from the attenuation
+    configured in the BBD file. This includes the level of the FSK signal in
+    CID sequences. The range of this compensation is limited to the maximum
+    level of the tone generators. This feature is disabled by default but can
+    be enabled by providing "--enable-tone-generator-level-compensation"
+    during configure stage. [VOICECPE_SW-2654]
+FIX Fixed crash in error handling when BBD download is called on device fds
+    but data structs are not initialised. [VOICECPE_SW-2660]
+CHG Improve TAPI API configure selection. From now --enable-tapi4 can be given
+    without the need to set --disable-tapi3. [VOICECPE_SW-2648]
+NEW Add support for linux based ARM 32 and 64-bit platforms compilation.
+    Compilation is possible by giving correct configure triplets, setting ARCH
+    symbol and adding path to toolchain to PATH variable if needed.
+    [VOICECPE_SW-2655]
+NEW Add procfs entry "debug_level" to set the verbosity level of debug output
+    to the console during runtime. [VOICECPE_SW-2652]
+NEW Implement TAPI debug buffer which can act as a helper for SPI traffic
+    tracing, storing custom user entries. It can be accessed via procfs and
+    ioctl interfaces. [VOICECPE_SW-2647]
+
+-------------------------------------------------------------------------------
+                  |  2023-11-29  | Test candidate
+-------------------------------------------------------------------------------
+NEW Create a new Standalone TAPI for the DXS driver by combining TAPI driver
+    version 4.26.0.0 and Duslic XS driver version 1.10.0.0 [VOICECPE_SW-2630]

@@ -1,0 +1,18 @@
+/* include/drv_config_tapi_compatibility.h.in.  Generated from configure.ac by autoheader.  */
+
+/******************************************************************************
+
+  Copyright 2024 MaxLinear, Inc.
+
+  For licensing information, see the file 'LICENSE' in the root folder of
+  this software module.
+
+******************************************************************************/
+
+#ifndef _DRV_TAPI_DXS_CONFIG_CLASSIC_TAPI_COMPATIBILITY_DEFINES_H_
+#define _DRV_TAPI_DXS_CONFIG_CLASSIC_TAPI_COMPATIBILITY_DEFINES_H_
+
+/* keep TAPI ioctl API compatible with classic TAPI driver */
+#undef CLASSIC_TAPI_COMPATIBLE
+
+#endif /* _DRV_TAPI_DXS_CONFIG_CLASSIC_TAPI_COMPATIBILITY_DEFINES_H_ */
