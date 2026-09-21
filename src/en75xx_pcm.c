@@ -15,6 +15,7 @@
 #include <linux/io.h>
 #include <linux/kfifo.h>
 #include <linux/list.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -29,6 +30,117 @@
 #include "../include/en75xx_voice.h"
 #include "en75xx_pcm_regs.h"
 #include "en75xx_g711.h"
+#include "oslec.h"
+
+static bool clock_on_probe = true;
+module_param_named(clock_on_probe, clock_on_probe, bool, 0444);
+MODULE_PARM_DESC(clock_on_probe, "Start PCM interface clocking (PCLK/FSYNC) on probe");
+
+static bool lec_enable;
+module_param_named(lec_enable, lec_enable, bool, 0644);
+MODULE_PARM_DESC(lec_enable, "Enable OSLEC line echo cancellation on the RX path");
+
+/*
+ * 128 samples = 16ms at 8kHz, shorter than any of the vendor's own
+ * documented echo-canceller tail-length options (MediaTek ADAM API:
+ * EC_TAIL_LENGTH_36MS/48MS/60MS/72MS). Tried 576 (72ms, the vendor's
+ * longest option) on the theory that a longer real echo path was
+ * defeating a too-short filter -- tested live and made audio quality
+ * worse, not better ("horror movie" distortion), so reverted. Longer
+ * taps take longer to converge and are more prone to misadaptation if
+ * the adaptation step size isn't adjusted for the new length; whatever
+ * this board's real problem is, it isn't simply "the tail is too
+ * short."
+ */
+static int lec_taps = 128;
+module_param_named(lec_taps, lec_taps, int, 0444);
+MODULE_PARM_DESC(lec_taps, "OSLEC length: 0 disables, otherwise power of two from 2 to 4096 samples");
+
+#define EN75XX_PCM_LEC_ADAPTION_MODE \
+	(ECHO_CAN_USE_ADAPTION | ECHO_CAN_USE_NLP | ECHO_CAN_USE_CLIP)
+
+static int lec_adaption_mode = EN75XX_PCM_LEC_ADAPTION_MODE;
+module_param_named(lec_adaption_mode, lec_adaption_mode, int, 0444);
+MODULE_PARM_DESC(lec_adaption_mode, "OSLEC mode bits: 0 adapt, 1 NLP, 2 CNG, 3 clip, 4 tx_hpf, 5 rx_hpf, 6 disable");
+
+static int swap_samples = -1;
+module_param_named(swap_samples, swap_samples, int, 0644);
+MODULE_PARM_DESC(swap_samples, "Sample pair swap for 16-bit linear PCM (-1: auto/DTS, 0: disabled, 1: enabled/swap)");
+
+static bool alc_enable = true;
+module_param_named(alc_enable, alc_enable, bool, 0644);
+MODULE_PARM_DESC(alc_enable, "Enable vendor-derived Auto Level Control (ALC) and noise gate on RX");
+
+static bool alc_noise_gate = true;
+module_param_named(alc_noise_gate, alc_noise_gate, bool, 0644);
+MODULE_PARM_DESC(alc_noise_gate, "Attenuate baseline analog line hiss when idle");
+
+static int alc_ref_gain = 24;
+module_param_named(alc_ref_gain, alc_ref_gain, int, 0644);
+MODULE_PARM_DESC(alc_ref_gain, "Target speech dB index for ALC (default 24)");
+
+static int alc_noise_thresh = 40;
+module_param_named(alc_noise_thresh, alc_noise_thresh, int, 0644);
+MODULE_PARM_DESC(alc_noise_thresh, "Noise floor threshold dB index (default 40)");
+
+static int alc_speech_thresh = 35;
+module_param_named(alc_speech_thresh, alc_speech_thresh, int, 0644);
+MODULE_PARM_DESC(alc_speech_thresh, "Speech activity threshold dB index (default 35)");
+
+static int alc_delta_thresh = 2;
+module_param_named(alc_delta_thresh, alc_delta_thresh, int, 0644);
+MODULE_PARM_DESC(alc_delta_thresh, "ALC hysteresis deadband in dB (default 2)");
+
+static int alc_up_shift = 1;
+module_param_named(alc_up_shift, alc_up_shift, int, 0644);
+MODULE_PARM_DESC(alc_up_shift, "ALC max upward gain step in dB (default 1)");
+
+static int alc_down_shift = 2;
+module_param_named(alc_down_shift, alc_down_shift, int, 0644);
+MODULE_PARM_DESC(alc_down_shift, "ALC max downward gain step in dB (default 2)");
+
+/*
+ * MediaTek / EcoNet VoIP Auto Level Control (ALC) Tables
+ * Extracted from stock firmware fxs3_silicon_si32192.ko (GPL / Flash dump)
+ *
+ * attenTable_4db: Coarse 4.0 dB steps (19 entries: +20 dB down to -52 dB).
+ *                 Entry [5] is 0x0ccc = 3276 (0.0 dB unity gain).
+ * attenTable_05db: Fine 0.5 dB steps (7 entries: -0.5 dB down to -3.5 dB).
+ * alc_energy_table: L1 norm energy conversion table for 80 samples of 16-bit PCM.
+ *                   Entry [0] = 2621360 (max possible 80*32767), down to [59] = 2590.
+ */
+static const u16 attenTable_4db[19] = {
+	0x7fff, 0x50c2, 0x32f4, 0x2026, 0x1449, 0x0ccc, 0x0813, 0x0518,
+	0x0337, 0x0207, 0x0147, 0x00ce, 0x0082, 0x0052, 0x0033, 0x0020,
+	0x0014, 0x000d, 0x0008,
+};
+
+static const u16 attenTable_05db[7] = {
+	0x78d6, 0x7213, 0x6bb1, 0x65ab, 0x5ffb, 0x5a9d, 0x558b,
+};
+
+static const u32 alc_energy_table[60] = {
+	2621360, 2200000, 1820000, 1630000, 1400000, 1150000, 1050000,  970000,
+	 850000,  770000,  680000,  615000,  530000,  480000,  420000,  380000,
+	 335000,  305000,  270000,  240000,  210000,  190000,  170000,  150000,
+	 139000,  120000,  110000,   97000,   85000,   76000,   69000,   60000,
+	  54000,   48000,   42000,   38000,   34000,   30000,   26000,   23000,
+	  21000,   18000,   16500,   15000,   13500,   12200,   10600,    9800,
+	   9000,    8200,    7300,    6500,    5800,    5200,    4600,    4150,
+	   3650,    3300,    2930,    2590,
+};
+
+struct en75xx_pcm_alc {
+	s8 cur_gain_half_db;
+	s32 cur_mult;
+	u32 last_sum[8];
+	u32 last_avg_sum[8];
+	u8 sum_idx;
+	u8 avg_count;
+	u8 noise_flag;
+};
+
+#define EN75XX_PCM_MAX_RING_COUNT 16
 
 struct en75xx_pcm_soc_data {
 	const char *name;
@@ -39,11 +151,16 @@ struct en75xx_pcm_soc_data {
 	u32 dma_or;
 	u8 channel_mask;
 	bool pcm_v2;		/* EN7523: 12-byte descriptor, CHAN_ENABLE */
+	bool swap_samples;	/* swap 16-bit sample pairs on LE bus */
 };
 
 struct en75xx_pcm_chan {
 	struct kfifo rx_fifo;
 	struct kfifo tx_fifo;
+	s16 tx_desc_ref[EN75XX_PCM_MAX_RING_COUNT][EN75XX_PCM_FRAME_SAMPLES];
+	struct oslec_state *lec;
+	bool lec_active;
+	struct en75xx_pcm_alc alc;
 	spinlock_t fifo_lock;
 	wait_queue_head_t rx_wait;
 	wait_queue_head_t tx_wait;
@@ -58,6 +175,16 @@ struct en75xx_pcm_chan {
 	 */
 	enum en75xx_pcm_codec codec;
 	bool tx_msb;
+	/*
+	 * ALC is suspended while the line is dialling. The vendor's own
+	 * voice_autogain is gated the same way -- it carries a per-line
+	 * enable flag and is switched off during fax negotiation -- because
+	 * an adaptive gain loop has no business tracking call-progress
+	 * tones. Ours would pull gain down against the continuous dial tone
+	 * reflecting through the hybrid and bury the DTMF digits that
+	 * follow it.
+	 */
+	bool alc_suspended;
 };
 
 struct en75xx_pcm_dev {
@@ -85,8 +212,8 @@ struct en75xx_pcm_dev {
 	u8 dma_channel_mask;
 	u8 active_mask;
 	bool running;
-	bool big_endian_samples;	/* byte order within each 16-bit sample */
-	bool swap_samples;		/* order of samples within each 32-bit DMA word */
+	bool swap_samples;
+	bool big_endian_samples;
 	u64 dma_errors;
 };
 
@@ -96,6 +223,31 @@ static DEFINE_MUTEX(en75xx_pcm_list_lock);
 static inline struct en75xx_pcm_dev *to_pcm_dev(struct en75xx_pcm *pcm)
 {
 	return container_of(pcm, struct en75xx_pcm_dev, pub);
+}
+
+static inline bool en75xx_pcm_is_swap_samples(struct en75xx_pcm_dev *pcm)
+{
+	if (swap_samples >= 0)
+		return !!swap_samples;
+	return pcm->swap_samples;
+}
+
+static __maybe_unused u32 pcm_int_sqrt(u64 val)
+{
+	u64 b, m;
+
+	m = 1ULL << 62;
+	b = 0;
+	while (m > 0) {
+		if (val >= b + m) {
+			val -= b + m;
+			b = (b >> 1) + m;
+		} else {
+			b >>= 1;
+		}
+		m >>= 2;
+	}
+	return (u32)b;
 }
 
 static inline u32 pcm_read(struct en75xx_pcm_dev *pcm, u32 reg)
@@ -212,11 +364,12 @@ static void en75xx_pcm_compand_tx(struct en75xx_pcm_chan *ch, u8 *dst)
 }
 
 static void en75xx_pcm_fill_tx_channel(struct en75xx_pcm_dev *pcm,
-				       unsigned int channel, u8 *dst)
+				       unsigned int channel, u8 *dst,
+				       unsigned int index)
 {
 	struct en75xx_pcm_chan *ch = &pcm->chan[channel];
 	unsigned long flags;
-	unsigned int copied;
+	unsigned int copied, i;
 
 	spin_lock_irqsave(&ch->fifo_lock, flags);
 	copied = kfifo_out(&ch->tx_fifo, dst, EN75XX_PCM_FRAME_BYTES);
@@ -227,22 +380,25 @@ static void en75xx_pcm_fill_tx_channel(struct en75xx_pcm_dev *pcm,
 		ch->tx_underruns++;
 	}
 	ch->tx_bytes += copied;
+
+	/*
+	 * dst is canonical LE16 linear here, before companding/byte-swap.
+	 * Save this frame directly into the descriptor's TX reference buffer,
+	 * so RX for this exact descriptor index is paired 1:1 with what was
+	 * sent on the wire at that instant.
+	 */
+	if (index < EN75XX_PCM_MAX_RING_COUNT) {
+		for (i = 0; i < EN75XX_PCM_FRAME_SAMPLES; i++)
+			ch->tx_desc_ref[index][i] = get_unaligned_le16(dst + i * 2);
+	}
+
 	if (ch->codec != EN75XX_PCM_CODEC_LINEAR16) {
 		en75xx_pcm_compand_tx(ch, dst);
 	} else if (pcm->big_endian_samples) {
-		unsigned int i;
-
 		for (i = 0; i < EN75XX_PCM_FRAME_BYTES; i += 2)
 			swap(dst[i], dst[i + 1]);
-	} else if (pcm->swap_samples) {
-		/*
-		 * EN7528's gen1 PCM DMA packs two 16-bit linear samples per
-		 * 32-bit word in reverse chronological order on this SoC.
-		 * Swapping the pair here restores playback order; see
-		 * en75xx_pcm_push_rx_channel() for the matching RX unswap.
-		 */
+	} else if (en75xx_pcm_is_swap_samples(pcm)) {
 		u16 *s = (u16 *)dst;
-		unsigned int i;
 
 		for (i = 0; i < EN75XX_PCM_FRAME_SAMPLES; i += 2)
 			swap(s[i], s[i + 1]);
@@ -250,14 +406,163 @@ static void en75xx_pcm_fill_tx_channel(struct en75xx_pcm_dev *pcm,
 	wake_up_interruptible(&ch->tx_wait);
 }
 
+static inline u32 alc_calc_energy(const s16 *samples, unsigned int n)
+{
+	u32 sum = 0;
+	unsigned int i;
+
+	for (i = 0; i < n; i++) {
+		s32 v = samples[i];
+
+		sum += (v < 0) ? -v : v;
+	}
+	return sum;
+}
+
+static inline int alc_energy_to_db(u32 energy)
+{
+	int i;
+
+	for (i = 0; i < 60; i++) {
+		if (energy >= alc_energy_table[i])
+			return i + 1;
+	}
+	return 61;
+}
+
+static inline s32 alc_calc_multiplier(int gain_half_db)
+{
+	int g = clamp_val(gain_half_db, -40, 40);
+	int idx = 40 - g; /* 0..80 (0 = +20dB, 40 = 0dB, 80 = -20dB) */
+	int coarse = idx >> 3; /* 0..10 */
+	int fine = idx & 7;    /* 0..7 */
+
+	if (fine == 0)
+		return (s32)attenTable_4db[coarse];
+	return ((s32)attenTable_05db[fine - 1] * (s32)attenTable_4db[coarse]) / 32767;
+}
+
+static void en75xx_pcm_alc_reset(struct en75xx_pcm_alc *alc)
+{
+	alc->cur_gain_half_db = 0;
+	alc->cur_mult = 3276;
+	alc->sum_idx = 0;
+	alc->avg_count = 0;
+	alc->noise_flag = 0;
+	memset(alc->last_sum, 0, sizeof(alc->last_sum));
+	memset(alc->last_avg_sum, 0, sizeof(alc->last_avg_sum));
+}
+
+static bool en75xx_pcm_alc_active(const struct en75xx_pcm_chan *ch)
+{
+	return READ_ONCE(alc_enable) && !ch->alc_suspended;
+}
+
+static void en75xx_pcm_voice_autogain(struct en75xx_pcm_chan *ch, s16 *samples,
+				    unsigned int num_samples)
+{
+	struct en75xx_pcm_alc *alc = &ch->alc;
+	u32 energy;
+	int cur_db, deadband = clamp(READ_ONCE(alc_delta_thresh), 0, 40);
+	int i;
+
+	if (!en75xx_pcm_alc_active(ch))
+		return;
+
+	energy = alc_calc_energy(samples, num_samples);
+	cur_db = alc_energy_to_db(energy);
+
+	/* Check if signal is below speech threshold or in noise floor */
+	if (cur_db > alc_noise_thresh && cur_db > alc_speech_thresh) {
+		alc->noise_flag = 1;
+		/* Line is idle / silent. Freeze gain adaptation to avoid amplifying line hiss. */
+	} else {
+		alc->noise_flag = 0;
+		/* Active signal: accumulate into 8-frame rolling window */
+		alc->last_sum[alc->sum_idx] = energy;
+		alc->sum_idx = (alc->sum_idx + 1) & 7;
+
+		if (alc->sum_idx == 0) {
+			/* 8 frames accumulated (80 ms), compute rolling average */
+			u32 sum8 = 0;
+			u32 avg_energy = 0;
+			int avg_db, diff;
+
+			for (i = 0; i < 8; i++)
+				sum8 += (alc->last_sum[i] >> 3);
+
+			/* Average only populated history, avoiding startup bias. */
+			for (i = 7; i > 0; i--)
+				alc->last_avg_sum[i] = alc->last_avg_sum[i - 1];
+			alc->last_avg_sum[0] = sum8;
+			if (alc->avg_count < 8)
+				alc->avg_count++;
+			for (i = 0; i < alc->avg_count; i++)
+				avg_energy += alc->last_avg_sum[i];
+			avg_energy /= alc->avg_count;
+
+			avg_db = alc_energy_to_db(avg_energy);
+			/* Table indices are approximately 1 dB; gain is in 0.5 dB. */
+			diff = 2 * (avg_db - clamp(READ_ONCE(alc_ref_gain), 1, 61)) -
+				alc->cur_gain_half_db;
+
+			/* Hysteresis check (diff is in 0.5 dB units) */
+			if (diff > deadband) {
+				/* Signal is quieter than reference: increase gain */
+				if (diff > deadband + 4)
+					alc->cur_gain_half_db += min(diff,
+						clamp(READ_ONCE(alc_up_shift), 0, 20) * 2);
+				else
+					alc->cur_gain_half_db += min(diff,
+						clamp(READ_ONCE(alc_up_shift), 0, 20));
+			} else if (diff < -deadband) {
+				/* Signal is louder than reference: decrease gain */
+				if (diff < -(deadband + 4))
+					alc->cur_gain_half_db -= min(-diff,
+						clamp(READ_ONCE(alc_down_shift), 0, 20) * 2);
+				else
+					alc->cur_gain_half_db -= min(-diff,
+						clamp(READ_ONCE(alc_down_shift), 0, 20));
+			}
+			alc->cur_gain_half_db = clamp_val(alc->cur_gain_half_db, -40, 40);
+			alc->cur_mult = alc_calc_multiplier(alc->cur_gain_half_db);
+		}
+	}
+
+	/*
+	 * Apply digital gain scaling:
+	 * When noise_flag is set:
+	 * Vendor stock behavior freezes gain and falls back to baseline gain (3276 = unity 0 dB)
+	 * so idle background noise is never amplified.
+	 * If alc_noise_gate is also enabled, apply gentle attenuation (-6 dB) during idle.
+	 */
+	if (alc->noise_flag) {
+		s32 mult = alc_noise_gate ? ((3276 * 5) / 10) : 3276;
+
+		for (i = 0; i < num_samples; i++) {
+			s32 val = ((s32)samples[i] * mult) / 3276;
+
+			samples[i] = clamp_val(val, -32768, 32767);
+		}
+	} else {
+		for (i = 0; i < num_samples; i++) {
+			s32 val = ((s32)samples[i] * alc->cur_mult) / 3276;
+
+			samples[i] = clamp_val(val, -32768, 32767);
+		}
+	}
+}
+
 static void en75xx_pcm_push_rx_channel(struct en75xx_pcm_dev *pcm,
-				       unsigned int channel, const u8 *src)
+				       unsigned int channel, const u8 *src,
+				       unsigned int index)
 {
 	struct en75xx_pcm_chan *ch = &pcm->chan[channel];
 	unsigned long flags;
 	unsigned int copied;
-	u8 tmp[EN75XX_PCM_FRAME_BYTES];
+	u8 tmp[EN75XX_PCM_FRAME_BYTES] __aligned(2);
 	const u8 *data = src;
+	bool do_alc = en75xx_pcm_alc_active(ch);
 	unsigned int i;
 
 	if (ch->codec != EN75XX_PCM_CODEC_LINEAR16) {
@@ -273,7 +578,7 @@ static void en75xx_pcm_push_rx_channel(struct en75xx_pcm_dev *pcm,
 			put_unaligned_le16(linear, tmp + i * 2);
 		}
 		data = tmp;
-		goto queue;
+		goto process_dsp;
 	}
 
 	if (pcm->big_endian_samples) {
@@ -282,7 +587,7 @@ static void en75xx_pcm_push_rx_channel(struct en75xx_pcm_dev *pcm,
 			tmp[i + 1] = src[i];
 		}
 		data = tmp;
-	} else if (pcm->swap_samples) {
+	} else if (en75xx_pcm_is_swap_samples(pcm)) {
 		const u16 *s = (const u16 *)src;
 		u16 *d = (u16 *)tmp;
 
@@ -291,9 +596,32 @@ static void en75xx_pcm_push_rx_channel(struct en75xx_pcm_dev *pcm,
 			d[i + 1] = s[i];
 		}
 		data = tmp;
+	} else if (ch->lec || do_alc) {
+		memcpy(tmp, src, EN75XX_PCM_FRAME_BYTES);
+		data = tmp;
 	}
 
-queue:
+process_dsp:
+	if (ch->lec && ch->lec_active != READ_ONCE(lec_enable)) {
+		ch->lec_active = READ_ONCE(lec_enable);
+		oslec_flush(ch->lec);
+	}
+	if (ch->lec && ch->lec_active && index < EN75XX_PCM_MAX_RING_COUNT) {
+		for (i = 0; i < EN75XX_PCM_FRAME_SAMPLES; i++) {
+			s16 rx = get_unaligned_le16(tmp + i * 2);
+			s16 tx = ch->tx_desc_ref[index][i];
+
+			put_unaligned_le16(oslec_update(ch->lec, tx, rx),
+					   tmp + i * 2);
+		}
+		data = tmp;
+	}
+
+	if (do_alc) {
+		en75xx_pcm_voice_autogain(ch, (s16 *)tmp, EN75XX_PCM_FRAME_SAMPLES);
+		data = tmp;
+	}
+
 	spin_lock_irqsave(&ch->fifo_lock, flags);
 	if (kfifo_avail(&ch->rx_fifo) < EN75XX_PCM_FRAME_BYTES) {
 		u8 discard[EN75XX_PCM_FRAME_BYTES];
@@ -320,7 +648,7 @@ static void en75xx_pcm_fill_tx_desc(struct en75xx_pcm_dev *pcm,
 		u8 *dst = frame + channel * EN75XX_PCM_FRAME_BYTES;
 
 		if (pcm->active_mask & BIT(channel))
-			en75xx_pcm_fill_tx_channel(pcm, channel, dst);
+			en75xx_pcm_fill_tx_channel(pcm, channel, dst, index);
 		else
 			memset(dst, 0, EN75XX_PCM_FRAME_BYTES);
 	}
@@ -356,7 +684,8 @@ static void en75xx_pcm_process(struct en75xx_pcm_dev *pcm)
 				if (!(pcm->active_mask & BIT(channel)))
 					continue;
 				en75xx_pcm_push_rx_channel(pcm, channel,
-					frame + channel * EN75XX_PCM_FRAME_BYTES);
+					frame + channel * EN75XX_PCM_FRAME_BYTES,
+					index);
 			}
 			en75xx_pcm_rearm_rx_desc(pcm, index);
 			pcm_write(pcm, EN75XX_PCM_RX_POLL, 1);
@@ -370,6 +699,40 @@ static void en75xx_pcm_process(struct en75xx_pcm_dev *pcm)
 		}
 	}
 }
+
+/*
+ * Program the interface control register and timeslots to clock PCLK/FSYNC
+ * without starting DMA. Slaves like the Si32192 ProSLIC require continuous
+ * PCLK/FSYNC to respond to in-band control (ISI/ZSI) even when on-hook/idle.
+ */
+static void en75xx_pcm_iface_start(struct en75xx_pcm_dev *pcm)
+{
+	unsigned int i;
+
+	for (i = 0; i < EN75XX_PCM_SLOT_REGS; i++) {
+		pcm_write(pcm, EN75XX_PCM_TX_SLOT0 + i * 4, pcm->tx_slots[i]);
+		pcm_write(pcm, EN75XX_PCM_RX_SLOT0 + i * 4, pcm->rx_slots[i]);
+	}
+	/* The vendor driver commits this register with a clear -> set edge. */
+	pcm_write(pcm, EN75XX_PCM_IFACE_CTRL,
+		  pcm->iface_ctrl & ~EN75XX_PCM_CTRL_CFG_VALID);
+	pcm_write(pcm, EN75XX_PCM_IFACE_CTRL,
+		  pcm->iface_ctrl | EN75XX_PCM_CTRL_CFG_VALID);
+}
+
+void en75xx_pcm_iface_kick(struct en75xx_pcm *pub)
+{
+	struct en75xx_pcm_dev *pcm;
+
+	if (!pub)
+		return;
+
+	pcm = to_pcm_dev(pub);
+	mutex_lock(&pcm->lock);
+	en75xx_pcm_iface_start(pcm);
+	mutex_unlock(&pcm->lock);
+}
+EXPORT_SYMBOL_GPL(en75xx_pcm_iface_kick);
 
 static int en75xx_pcm_hw_start(struct en75xx_pcm_dev *pcm)
 {
@@ -485,12 +848,32 @@ static int en75xx_pcm_line_start(struct en75xx_pcm *pub, unsigned int channel)
 
 	mutex_lock(&pcm->lock);
 	if (!(pcm->active_mask & BIT(channel))) {
+		struct en75xx_pcm_chan *ch = &pcm->chan[channel];
+
+		/* Allocate once so lec_enable can safely toggle during a call. */
+		ch->lec_active = false;
+		if (lec_taps > 0) {
+			ch->lec = oslec_create(lec_taps,
+						lec_adaption_mode);
+			if (!ch->lec)
+				dev_warn(pcm->dev,
+					 "channel %u: failed to allocate echo canceller\n",
+					 channel);
+		}
+		memset(ch->tx_desc_ref, 0, sizeof(ch->tx_desc_ref));
+		memset(&ch->alc, 0, sizeof(ch->alc));
+		ch->alc.cur_mult = 3276;
+		ch->alc.noise_flag = 1;
+
 		pcm->active_mask |= BIT(channel);
 		if (!pcm->running)
 			ret = en75xx_pcm_hw_start(pcm);
-		if (ret)
+		if (ret) {
 			pcm->active_mask &= ~BIT(channel);
-		else if (pcm->irq < 0)
+			if (ch->lec)
+				oslec_free(ch->lec);
+			ch->lec = NULL;
+		} else if (pcm->irq < 0)
 			mod_delayed_work(system_highpri_wq, &pcm->poll_work, 1);
 	}
 	mutex_unlock(&pcm->lock);
@@ -500,9 +883,11 @@ static int en75xx_pcm_line_start(struct en75xx_pcm *pub, unsigned int channel)
 static void en75xx_pcm_line_stop(struct en75xx_pcm *pub, unsigned int channel)
 {
 	struct en75xx_pcm_dev *pcm = to_pcm_dev(pub);
+	struct en75xx_pcm_chan *ch;
 
 	if (channel >= EN75XX_PCM_MAX_CHANNELS)
 		return;
+	ch = &pcm->chan[channel];
 
 	mutex_lock(&pcm->lock);
 	pcm->active_mask &= ~BIT(channel);
@@ -510,6 +895,9 @@ static void en75xx_pcm_line_stop(struct en75xx_pcm *pub, unsigned int channel)
 		en75xx_pcm_hw_stop(pcm);
 		pcm->running = false;
 	}
+	if (ch->lec)
+		oslec_free(ch->lec);
+	ch->lec = NULL;
 	mutex_unlock(&pcm->lock);
 }
 
@@ -569,6 +957,26 @@ static ssize_t en75xx_pcm_line_write(struct en75xx_pcm *pub, unsigned int channe
 	return copied;
 }
 
+static void en75xx_pcm_line_set_alc(struct en75xx_pcm *pub, unsigned int channel,
+				    bool enable)
+{
+	struct en75xx_pcm_dev *pcm = to_pcm_dev(pub);
+	struct en75xx_pcm_chan *ch;
+
+	if (channel >= EN75XX_PCM_MAX_CHANNELS)
+		return;
+	ch = &pcm->chan[channel];
+	mutex_lock(&pcm->lock);
+	if (ch->alc_suspended == !enable)
+		goto out;
+	ch->alc_suspended = !enable;
+	/* resume from unity so the loop does not inherit a dialling-era gain */
+	if (enable)
+		en75xx_pcm_alc_reset(&ch->alc);
+out:
+	mutex_unlock(&pcm->lock);
+}
+
 static void en75xx_pcm_line_flush(struct en75xx_pcm *pub, unsigned int channel)
 {
 	struct en75xx_pcm_dev *pcm = to_pcm_dev(pub);
@@ -578,10 +986,13 @@ static void en75xx_pcm_line_flush(struct en75xx_pcm *pub, unsigned int channel)
 	if (channel >= EN75XX_PCM_MAX_CHANNELS)
 		return;
 	ch = &pcm->chan[channel];
+	mutex_lock(&pcm->lock);
 	spin_lock_irqsave(&ch->fifo_lock, flags);
 	kfifo_reset(&ch->rx_fifo);
 	kfifo_reset(&ch->tx_fifo);
+	en75xx_pcm_alc_reset(&ch->alc);
 	spin_unlock_irqrestore(&ch->fifo_lock, flags);
+	mutex_unlock(&pcm->lock);
 }
 
 static void en75xx_pcm_line_get_stats(struct en75xx_pcm *pub,
@@ -671,6 +1082,7 @@ static const struct en75xx_pcm_line_ops en75xx_pcm_line_ops = {
 	.set_format = en75xx_pcm_line_set_format,
 	.poll_wait = en75xx_pcm_line_poll_wait,
 	.rx_avail = en75xx_pcm_line_rx_avail,
+	.set_alc = en75xx_pcm_line_set_alc,
 	.tx_space = en75xx_pcm_line_tx_space,
 };
 
@@ -808,6 +1220,11 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 	u32 channel_mask;
 	int ret;
 
+	if (lec_taps < 0 || lec_taps > 4096 ||
+	    (lec_taps && (lec_taps < 2 || !is_power_of_2(lec_taps))) ||
+	    (lec_adaption_mode & ~0x7f))
+		return -EINVAL;
+
 	BUILD_BUG_ON(sizeof(struct en75xx_pcm_desc_v1) != 0x24);
 	BUILD_BUG_ON(sizeof(struct en75xx_pcm_desc_v2) != 0x0c);
 
@@ -853,10 +1270,13 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 	device_property_read_u32_array(dev, "airoha,rx-slot-config",
 				       pcm->rx_slots,
 				       EN75XX_PCM_SLOT_REGS);
-	pcm->big_endian_samples = device_property_read_bool(dev,
-						    "airoha,pcm-big-endian");
-	pcm->swap_samples = device_property_read_bool(dev,
-						    "airoha,pcm-swap-samples");
+	pcm->swap_samples = pcm->soc->swap_samples ||
+			    device_property_read_bool(dev, "airoha,pcm-swap-samples");
+	pcm->big_endian_samples = device_property_read_bool(dev, "airoha,pcm-big-endian");
+	dev_info(dev, "PCM 16-bit linear sample pair swap: %s (default: %s, module param: %d)\n",
+		 en75xx_pcm_is_swap_samples(pcm) ? "enabled" : "disabled",
+		 pcm->swap_samples ? "enabled" : "disabled",
+		 swap_samples);
 
 	ret = dma_set_mask_and_coherent(dev, pcm->soc->dma_mask);
 	if (ret)
@@ -899,6 +1319,10 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 			kfifo_free(&ch->rx_fifo);
 			goto err_fifo;
 		}
+		ch->alc.cur_gain_half_db = 0;
+		ch->alc.cur_mult = 3276;
+		ch->alc.sum_idx = 0;
+		ch->alc.noise_flag = 0;
 	}
 
 	pcm->irq = platform_get_irq_optional(pdev, 0);
@@ -917,13 +1341,17 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 	pcm->pub.fwnode = dev_fwnode(dev);
 	pcm->pub.line_ops = &en75xx_pcm_line_ops;
 	platform_set_drvdata(pdev, pcm);
+
 	en75xx_pcm_hw_stop(pcm);
+	if (clock_on_probe)
+		en75xx_pcm_iface_start(pcm);
 	ret = en75xx_pcm_register(&pcm->pub);
 	if (ret)
 		goto err_fifo;
 
-	dev_info(dev, "%s PCM: %u descriptors, irq=%d\n",
-		 pcm->soc->name, pcm->soc->ring_count, pcm->irq);
+	dev_info(dev, "%s PCM: %u descriptors, irq=%d%s\n",
+		 pcm->soc->name, pcm->soc->ring_count, pcm->irq,
+		 clock_on_probe ? ", interface clock active" : "");
 	return 0;
 
 err_fifo:
@@ -943,9 +1371,12 @@ static void en75xx_pcm_remove(struct platform_device *pdev)
 	cancel_delayed_work_sync(&pcm->poll_work);
 	mutex_lock(&pcm->lock);
 	en75xx_pcm_hw_stop(pcm);
+	pcm_write(pcm, EN75XX_PCM_IFACE_CTRL, 0);
 	pcm->running = false;
 	mutex_unlock(&pcm->lock);
 	for (channel = 0; channel < EN75XX_PCM_MAX_CHANNELS; channel++) {
+		if (pcm->chan[channel].lec)
+			oslec_free(pcm->chan[channel].lec);
 		kfifo_free(&pcm->chan[channel].rx_fifo);
 		kfifo_free(&pcm->chan[channel].tx_fifo);
 	}
@@ -971,6 +1402,7 @@ static const struct en75xx_pcm_soc_data en7528_pcm_data = {
 	.ring_cfg = 0x9f,
 	.dma_mask = 0x1fffffff,
 	.channel_mask = GENMASK(7, 0),
+	.swap_samples = true,
 };
 
 static const struct en75xx_pcm_soc_data en7523_pcm_data = {
