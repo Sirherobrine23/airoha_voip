@@ -50,6 +50,13 @@ struct en75xx_pcm_line_ops {
 	void (*poll_wait)(struct en75xx_pcm *pcm, unsigned int channel,
 			  struct file *file, struct poll_table_struct *wait);
 	unsigned int (*rx_avail)(struct en75xx_pcm *pcm, unsigned int channel);
+	/*
+	 * Suspend the automatic level control on one channel. Dial tone and
+	 * DTMF are not speech, and letting the loop adapt to them buries the
+	 * digits; the vendor gates its own autogain the same way.
+	 */
+	void (*set_alc)(struct en75xx_pcm *pcm, unsigned int channel,
+			bool enable);
 	unsigned int (*tx_space)(struct en75xx_pcm *pcm, unsigned int channel);
 };
 
@@ -59,6 +66,8 @@ struct en75xx_voice_slic_ops {
 		    unsigned int off_ms);
 	int (*set_linefeed)(void *priv, enum en75xx_voice_linefeed state);
 	int (*get_faults)(void *priv, u32 *faults);
+	/* Optional: play a tone from the SLIC's own oscillators. */
+	int (*set_tone)(void *priv, const struct en75xx_voice_tone *tone);
 };
 
 struct en75xx_pcm {
@@ -80,6 +89,7 @@ int en75xx_pcm_channel_for_slot(struct en75xx_pcm *pcm, unsigned int bus_slot);
  */
 int en75xx_pcm_channel_bit_offset(struct en75xx_pcm *pcm, unsigned int channel);
 void en75xx_pcm_put(struct en75xx_pcm *pcm);
+void en75xx_pcm_iface_kick(struct en75xx_pcm *pcm);
 int en75xx_pcm_register(struct en75xx_pcm *pcm);
 void en75xx_pcm_unregister(struct en75xx_pcm *pcm);
 

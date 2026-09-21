@@ -34,6 +34,7 @@ struct en75xx_voice_line {
 	atomic_t event_seq;
 	bool opened;
 	bool ringing;
+	bool tone_on;
 	enum en75xx_voice_linefeed linefeed;
 	u64 hook_changes;
 };
@@ -89,6 +90,13 @@ static int en75xx_voice_release(struct inode *inode, struct file *file)
 	if (line->ringing && line->slic_ops->ring) {
 		line->slic_ops->ring(line->slic_priv, false, 0, 0);
 		line->ringing = false;
+	}
+	if (line->tone_on) {
+		/* an oscillator left running would sing at the next off-hook */
+		const struct en75xx_voice_tone silence = {};
+
+		line->slic_ops->set_tone(line->slic_priv, &silence);
+		line->tone_on = false;
 	}
 	if (line->opened) {
 		line->pcm->line_ops->stop(line->pcm, line->pcm_channel);
@@ -158,8 +166,9 @@ static long en75xx_voice_ioctl(struct file *file, unsigned int cmd,
 	struct en75xx_voice_line_state state = {};
 	struct en75xx_voice_info info = {};
 	struct en75xx_voice_ring ring;
+	struct en75xx_voice_tone tone;
 	struct en75xx_voice_stats stats = {};
-	u32 linefeed, faults = 0;
+	u32 linefeed, alc, faults = 0;
 	int ret;
 
 	switch (cmd) {
@@ -173,6 +182,8 @@ static long en75xx_voice_ioctl(struct file *file, unsigned int cmd,
 		info.capabilities = EN75XX_VOICE_CAP_PCM |
 			EN75XX_VOICE_CAP_RING | EN75XX_VOICE_CAP_HOOK |
 			EN75XX_VOICE_CAP_LINEFEED;
+		if (line->slic_ops->set_tone)
+			info.capabilities |= EN75XX_VOICE_CAP_TONE;
 		strscpy(info.slic, line->slic_name, sizeof(info.slic));
 		return copy_to_user((void __user *)arg, &info, sizeof(info)) ?
 			-EFAULT : 0;
@@ -211,6 +222,24 @@ static long en75xx_voice_ioctl(struct file *file, unsigned int cmd,
 		if (!ret)
 			line->linefeed = linefeed;
 		return ret;
+	case EN75XX_VOICE_SET_TONE:
+		if (copy_from_user(&tone, (void __user *)arg, sizeof(tone)))
+			return -EFAULT;
+		if (!line->slic_ops->set_tone)
+			return -EOPNOTSUPP;
+		mutex_lock(&line->lock);
+		ret = line->slic_ops->set_tone(line->slic_priv, &tone);
+		if (!ret)
+			line->tone_on = tone.freq1_hz || tone.freq2_hz;
+		mutex_unlock(&line->lock);
+		return ret;
+	case EN75XX_VOICE_SET_ALC:
+		if (copy_from_user(&alc, (void __user *)arg, sizeof(alc)))
+			return -EFAULT;
+		if (!line->pcm->line_ops->set_alc)
+			return -EOPNOTSUPP;
+		line->pcm->line_ops->set_alc(line->pcm, line->pcm_channel, !!alc);
+		return 0;
 	case EN75XX_VOICE_FLUSH:
 		line->pcm->line_ops->flush(line->pcm, line->pcm_channel);
 		return 0;
@@ -311,6 +340,7 @@ en75xx_voice_register_line(struct device *dev, struct en75xx_pcm *pcm,
 	}
 	line->misc.fops = &en75xx_voice_fops;
 	line->misc.parent = dev;
+	line->misc.mode = 0660;
 	ret = misc_register(&line->misc);
 	if (ret)
 		goto err_ida;
