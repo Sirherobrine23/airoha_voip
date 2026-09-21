@@ -25,14 +25,19 @@ immediate     = no
 ; this platform, so the tones have to be pulled out of the audio.
 hardware_dtmf = no
 
-; ast_playtones_start() amplitude. dial tone plays continuously from
-; off-hook to first digit and reflects across the hybrid into the mic
-; path the whole time; a quieter dial tone than other indications keeps
-; that reflection from raising the DTMF detector's noise floor. Defaults
-; are a reasonable starting point, not a calibrated value -- tune per
-; hybrid/handset if dialing is unreliable or the tone sounds off.
-; dialtone_volume      = 1000
-; callprogress_volume  = 800
+; Dial tone. hardware_tones=yes plays it from the SLIC's own oscillators
+; instead of synthesising it in Asterisk, which keeps a continuous tone
+; off the CPU for as long as the handset sits off-hook and undialled.
+; It needs a SLIC that advertises the capability; otherwise, and when
+; hardware_tones=no, the tone comes from the channel's indications.conf
+; zone at dialtone_volume instead.
+hardware_tones     = yes
+dialtone_freq1     = 400           ; Hz; 400 continuous is the Indian tone
+dialtone_freq2     = 0             ; second oscillator, 0 for a pure tone
+dialtone_level     = -18           ; dBm, per oscillator
+; play_dialtone    = yes           ; no leaves the line silent off-hook
+; dialtone_volume  = 3500          ; software dial tone, 0..32767
+; callprogress_volume = 5000       ; software busy/congestion/ringback
 
 ; mohinterpret = default
 
