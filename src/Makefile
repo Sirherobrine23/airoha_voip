@@ -11,12 +11,15 @@
 #   en75xx-isi-spi ISI transport, exposed as a spi_controller (ProSLIC)
 #   en75xx-slic-*  one per SLIC family
 
+obj-m += en75xx-lec.o
 obj-m += en75xx-pcm.o
 obj-m += en75xx-voice.o
 obj-m += en75xx-zsi.o
 obj-m += en75xx-isi-spi.o
 obj-m += en75xx-slic-le9642.o
 obj-m += en75xx-slic-si3219x.o
+
+en75xx-lec-objs            := ../vendor/oslec/echo.o
 
 en75xx-pcm-objs            := en75xx_pcm.o
 en75xx-voice-objs          := en75xx_voice_core.o
@@ -39,6 +42,7 @@ en75xx-slic-si3219x-objs   := en75xx_slic_si3219x.o en75xx_proslic_fw.o \
 	$(PROSLIC_DIR)/src/si3219x_intf.o \
 	$(PROSLIC_DIR)/custom/si3219x_LCCB_constants.o
 
+ccflags-y += -I$(src)/../vendor/oslec
 ccflags-y += -I$(src)/../include
 ccflags-y += -I$(src)/$(PROSLIC_DIR)/inc
 ccflags-y += -I$(src)/$(PROSLIC_DIR)/custom
