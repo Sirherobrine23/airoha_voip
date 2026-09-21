@@ -63,6 +63,9 @@ define Build/Compile
 endef
 
 define Package/asterisk-chan-en75xx/install
+	$(INSTALL_DIR) $(1)/etc/init.d $(1)/etc/hotplug.d/misc
+	$(INSTALL_BIN) ./files/en75xx-fxs-perms.init $(1)/etc/init.d/en75xx-fxs-perms
+	$(INSTALL_DATA) ./files/50-en75xx-fxs $(1)/etc/hotplug.d/misc/50-en75xx-fxs
 	$(INSTALL_DIR) $(1)/usr/lib/asterisk/modules
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/chan_en75xx.so \
 		$(1)/usr/lib/asterisk/modules/

@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0
+
+# Run before Asterisk (START=99), including devices created early in boot.
+START=98
+
+start() {
+	local dev
+
+	for dev in /dev/en75xx-fxs[0-9]*; do
+		[ -c "$dev" ] || continue
+		chown root:asterisk "$dev" && chmod 660 "$dev"
+	done
+}

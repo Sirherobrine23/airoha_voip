@@ -22,10 +22,18 @@ EN75XX_VOIP_SOURCE_DIR:=$(if $(wildcard $(CURDIR)/src/Makefile),$(CURDIR),$(real
 
 include ./firmware.mk
 
+define KernelPackage/en75xx-lec
+  SUBMENU:=Voice over IP
+  TITLE:=OSLEC line echo canceller
+  DEPENDS:=@TARGET_econet||TARGET_airoha
+  FILES:=$(PKG_BUILD_DIR)/en75xx-lec.ko
+  AUTOLOAD:=$(call AutoLoad,49,en75xx-lec)
+endef
+
 define KernelPackage/en75xx-pcm
   SUBMENU:=Voice over IP
   TITLE:=EcoNet/Airoha EN75xx PCM/TDM controller
-  DEPENDS:=@TARGET_econet||TARGET_airoha
+  DEPENDS:=@TARGET_econet||TARGET_airoha +kmod-en75xx-lec
   FILES:= \
 	$(PKG_BUILD_DIR)/en75xx-pcm.ko \
 	$(PKG_BUILD_DIR)/en75xx-voice.ko
@@ -125,6 +133,7 @@ define Build/Compile
 	$(if $(DXS_SELECTED),$(MAKE) $(PKG_JOBS) -C $(DXS_BUILD_DIR))
 endef
 
+$(eval $(call KernelPackage,en75xx-lec))
 $(eval $(call KernelPackage,en75xx-pcm))
 $(eval $(call KernelPackage,en75xx-slic-le9642))
 $(eval $(call KernelPackage,en75xx-slic-si3219x))

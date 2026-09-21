@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+
+case "$ACTION" in
+	add|change) ;;
+	*) exit 0 ;;
+esac
+
+case "${DEVNAME##*/}" in
+	en75xx-fxs[0-9]*) /etc/init.d/en75xx-fxs-perms start ;;
+esac
