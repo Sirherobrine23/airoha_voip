@@ -21,7 +21,7 @@ define Package/asterisk-chan-en75xx
   CATEGORY:=Network
   TITLE:=Asterisk channel driver for EN75xx FXS lines
   URL:=https://github.com/Sirherobrine23
-  DEPENDS:=+asterisk +kmod-en75xx-pcm
+  DEPENDS:=+asterisk +kmod-en75xx-pcm +asterisk-bridge-simple
 endef
 
 define Package/asterisk-chan-en75xx/description
