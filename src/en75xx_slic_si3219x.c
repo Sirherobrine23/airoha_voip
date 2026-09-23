@@ -39,6 +39,8 @@
 #include "si3219x_LCCB_constants.h"
 #include "en75xx_proslic_fw.h"
 
+extern Si3219x_General_Cfg Si3219x_General_Configuration;
+
 #define SI3219X_REG_RAM_WAIT	4
 #define SI3219X_REG_RAM_HI	5
 #define SI3219X_REG_RAM_D0	6
@@ -89,6 +91,7 @@ struct en75xx_si3219x {
 	struct gpio_desc *reset_gpio;
 	struct mutex io_lock;
 	struct mutex ram_lock;
+	struct mutex linefeed_lock;
 	struct list_head node;
 	SiVoiceControlInterfaceType ctrl;
 	SiVoiceDeviceType *device;
@@ -149,21 +152,28 @@ static int si3219x_write_reg(void *ctrl, uInt8 channel, uInt8 reg, uInt8 data)
 	return ret ? RC_SPI_FAIL : RC_NONE;
 }
 
-static uInt8 si3219x_read_reg(void *ctrl, uInt8 channel, uInt8 reg)
+static int si3219x_read_reg_checked(struct en75xx_si3219x *slic,
+				    uInt8 channel, uInt8 reg)
 {
-	struct en75xx_si3219x *slic = ctrl;
-	u8 tx[2], rx = 0xff;
+	u8 tx[2], rx;
 	int ret;
 
 	if (channel >= ARRAY_SIZE(si3219x_chan_addr))
-		return 0xff;
+		return -EINVAL;
 	tx[0] = SI3219X_CW_RD | si3219x_chan_addr[channel];
 	tx[1] = reg;
 
 	mutex_lock(&slic->io_lock);
 	ret = spi_write_then_read(slic->spi, tx, sizeof(tx), &rx, 1);
 	mutex_unlock(&slic->io_lock);
-	return ret ? 0xff : rx;
+	return ret ? ret : rx;
+}
+
+static uInt8 si3219x_read_reg(void *ctrl, uInt8 channel, uInt8 reg)
+{
+	int ret = si3219x_read_reg_checked(ctrl, channel, reg);
+
+	return ret < 0 ? 0xff : ret;
 }
 
 static int si3219x_wait_ram(void *ctrl, uInt8 channel)
@@ -470,13 +480,81 @@ static void si3219x_control_init(struct en75xx_si3219x *slic)
 static int en75xx_si3219x_get_hook(void *priv)
 {
 	struct en75xx_si3219x *slic = priv;
-	uInt8 hook = PROSLIC_ONHOOK;
-	int ret;
+	int status;
 
-	ret = ProSLIC_ReadHookStatus(slic->channel, &hook);
-	if (ret != RC_NONE)
-		return -EIO;
-	return hook == PROSLIC_OFFHOOK;
+	/* The vendor helper treats a failed register read (0xff) as off-hook. */
+	status = si3219x_read_reg_checked(slic, 0, PROSLIC_REG_LCRRTP);
+	return status < 0 ? status : !!(status & 2);
+}
+
+/* ProSLIC_SetLinefeedStatus()'s sequence, with checked SPI transfers. */
+static int si3219x_set_linefeed(struct en75xx_si3219x *slic, u8 lf)
+{
+	u8 irqen1 = Si3219x_General_Configuration.irqen1;
+	int state, autord, irq, ret, restore;
+
+	mutex_lock(&slic->linefeed_lock);
+	if (lf == LF_RINGING) {
+		state = si3219x_read_reg_checked(slic, 0, PROSLIC_REG_LINEFEED);
+		if (state < 0) {
+			ret = state;
+			goto out;
+		}
+		if ((state & 0xf) == LF_RINGING) {
+			ret = 0;
+			goto out;
+		}
+		if (irqen1 & 0x80) {
+			irq = si3219x_read_reg_checked(slic, 0, PROSLIC_REG_IRQEN1);
+			if (irq < 0) {
+				ret = irq;
+				goto out;
+			}
+			if (si3219x_write_reg(slic, 0, PROSLIC_REG_IRQEN1,
+					      irq & ~0x80) != RC_NONE) {
+				ret = -EIO;
+				goto out;
+			}
+		}
+		ret = si3219x_write_reg(slic, 0, PROSLIC_REG_LINEFEED, lf) ==
+			RC_NONE ? 0 : -EIO;
+		goto out;
+	}
+
+	autord = si3219x_read_reg_checked(slic, 0, PROSLIC_REG_AUTORD);
+	if (autord < 0) {
+		ret = autord;
+		goto out;
+	}
+	ret = -EIO;
+	if (si3219x_write_reg(slic, 0, PROSLIC_REG_AUTORD,
+			      autord & ~0x04) != RC_NONE)
+		goto restore_autord;
+
+	state = si3219x_read_reg_checked(slic, 0, PROSLIC_REG_LINEFEED);
+	if (state < 0) {
+		ret = state;
+	} else if ((state & 0xf0) == (LF_RINGING << 4) &&
+		   (state & 0xf) != LF_RINGING) {
+		/* The vendor defers a request while hardware leaves ringing. */
+		ret = -EAGAIN;
+	} else {
+		ret = si3219x_write_reg(slic, 0, PROSLIC_REG_LINEFEED, lf) ==
+			RC_NONE ? 0 : -EIO;
+	}
+
+restore_autord:
+	restore = si3219x_write_reg(slic, 0, PROSLIC_REG_AUTORD, autord);
+	if (!ret && restore != RC_NONE)
+		ret = -EIO;
+	if (ret != -EAGAIN && (irqen1 & 0x80)) {
+		restore = si3219x_write_reg(slic, 0, PROSLIC_REG_IRQEN1, irqen1);
+		if (!ret && restore != RC_NONE)
+			ret = -EIO;
+	}
+out:
+	mutex_unlock(&slic->linefeed_lock);
+	return ret;
 }
 
 static int en75xx_si3219x_set_linefeed(void *priv,
@@ -501,25 +579,34 @@ static int en75xx_si3219x_set_linefeed(void *priv,
 	default:
 		return -EINVAL;
 	}
-	return ProSLIC_SetLinefeedStatus(slic->channel, lf) == RC_NONE ? 0 : -EIO;
+	return si3219x_set_linefeed(slic, lf);
 }
 
 static void en75xx_si3219x_ring_work(struct work_struct *work)
 {
 	struct en75xx_si3219x *slic = container_of(to_delayed_work(work),
 		struct en75xx_si3219x, ring_work);
+	bool next_phase;
 	unsigned int delay;
+	int ret;
 
 	if (!READ_ONCE(slic->ring_enabled))
 		return;
 
-	slic->ring_phase = !slic->ring_phase;
-	if (slic->ring_phase) {
-		ProSLIC_RingStart(slic->channel);
+	next_phase = !slic->ring_phase;
+	if (next_phase) {
+		ret = si3219x_set_linefeed(slic, LF_RINGING);
 		delay = slic->ring_on_ms;
 	} else {
-		ProSLIC_SetLinefeedStatus(slic->channel, LF_FWD_ACTIVE);
+		ret = si3219x_set_linefeed(slic, LF_FWD_ACTIVE);
 		delay = slic->ring_off_ms;
+	}
+	if (ret) {
+		dev_warn_ratelimited(&slic->spi->dev,
+				     "ring cadence transition failed: %d\n", ret);
+		delay = 20;
+	} else {
+		slic->ring_phase = next_phase;
 	}
 	mod_delayed_work(system_wq, &slic->ring_work,
 			 max_t(unsigned long, 1, msecs_to_jiffies(delay)));
@@ -529,20 +616,25 @@ static int en75xx_si3219x_ring(void *priv, bool enable, unsigned int on_ms,
 			       unsigned int off_ms)
 {
 	struct en75xx_si3219x *slic = priv;
+	int ret;
 
+	WRITE_ONCE(slic->ring_enabled, false);
 	cancel_delayed_work_sync(&slic->ring_work);
-	slic->ring_enabled = enable;
 	if (!enable) {
+		ret = si3219x_set_linefeed(slic, LF_FWD_ACTIVE);
+		if (ret)
+			return ret;
 		slic->ring_phase = false;
-		return ProSLIC_SetLinefeedStatus(slic->channel, LF_FWD_ACTIVE) ==
-			RC_NONE ? 0 : -EIO;
+		return 0;
 	}
 
 	slic->ring_on_ms = on_ms ? on_ms : 1000;
 	slic->ring_off_ms = off_ms ? off_ms : 4000;
+	ret = si3219x_set_linefeed(slic, LF_RINGING);
+	if (ret)
+		return ret;
 	slic->ring_phase = true;
-	if (ProSLIC_RingStart(slic->channel) != RC_NONE)
-		return -EIO;
+	WRITE_ONCE(slic->ring_enabled, true);
 	mod_delayed_work(system_wq, &slic->ring_work,
 			msecs_to_jiffies(slic->ring_on_ms));
 	return 0;
@@ -758,21 +850,6 @@ static void si3219x_apply_pcm_fixups(struct en75xx_si3219x *slic)
 	si3219x_write_reg(slic, 0, PROSLIC_REG_IRQEN3, 0);
 
 	/*
-	 * DC-DC converter powersave (bit 3, PROSLIC_REG_ENHANCE |= 0x08) was
-	 * added and tested here mid-session -- user confirmed the audio
-	 * symptom was identical before and after adding it, so it's ruled
-	 * out as a factor and pulled back out to keep the variable set
-	 * simple while the real cause is still open. It's still a real,
-	 * vendor-matching improvement (rcS sets it unconditionally on every
-	 * boot; DC-DC ripple coupling into the line is a real mechanism,
-	 * just not this one) -- RE-ADD once the current investigation
-	 * concludes, as a read-modify-write (val | 0x08), not a blind
-	 * overwrite: ProSLIC_Init() already sets bit 0 of this same
-	 * register for narrowband/wideband HPF config, which a blind write
-	 * like the vendor's own "echo 0x8 > slicRegister" would clobber.
-	 */
-
-	/*
 	 * si3219x_apply_gains() has applied the calibrated gain/ACEQ setup
 	 * and any raw gain overrides. Report the resulting hardware values.
 	 */
@@ -974,6 +1051,7 @@ static int en75xx_si3219x_probe(struct spi_device *spi)
 	slic->spi = spi;
 	mutex_init(&slic->io_lock);
 	mutex_init(&slic->ram_lock);
+	mutex_init(&slic->linefeed_lock);
 	INIT_LIST_HEAD(&slic->node);
 	INIT_DELAYED_WORK(&slic->hook_work, en75xx_si3219x_hook_work);
 	INIT_DELAYED_WORK(&slic->ring_work, en75xx_si3219x_ring_work);

@@ -169,7 +169,7 @@ static long en75xx_voice_ioctl(struct file *file, unsigned int cmd,
 	struct en75xx_voice_tone tone;
 	struct en75xx_voice_stats stats = {};
 	u32 linefeed, alc, faults = 0;
-	int ret;
+	int ret, event_seq;
 
 	switch (cmd) {
 	case EN75XX_VOICE_GET_INFO:
@@ -188,6 +188,7 @@ static long en75xx_voice_ioctl(struct file *file, unsigned int cmd,
 		return copy_to_user((void __user *)arg, &info, sizeof(info)) ?
 			-EFAULT : 0;
 	case EN75XX_VOICE_GET_STATE:
+		event_seq = atomic_read(&line->event_seq);
 		ret = line->slic_ops->get_hook ?
 			line->slic_ops->get_hook(line->slic_priv) : -EOPNOTSUPP;
 		if (ret < 0)
@@ -198,18 +199,21 @@ static long en75xx_voice_ioctl(struct file *file, unsigned int cmd,
 		if (line->slic_ops->get_faults)
 			line->slic_ops->get_faults(line->slic_priv, &faults);
 		state.faults = faults;
-		vf->event_seq = atomic_read(&line->event_seq);
-		return copy_to_user((void __user *)arg, &state, sizeof(state)) ?
-			-EFAULT : 0;
+		if (copy_to_user((void __user *)arg, &state, sizeof(state)))
+			return -EFAULT;
+		WRITE_ONCE(vf->event_seq, event_seq);
+		return 0;
 	case EN75XX_VOICE_SET_RING:
 		if (copy_from_user(&ring, (void __user *)arg, sizeof(ring)))
 			return -EFAULT;
 		if (!line->slic_ops->ring)
 			return -EOPNOTSUPP;
+		mutex_lock(&line->lock);
 		ret = line->slic_ops->ring(line->slic_priv, !!ring.enable,
 					  ring.cadence_on_ms, ring.cadence_off_ms);
 		if (!ret)
 			line->ringing = !!ring.enable;
+		mutex_unlock(&line->lock);
 		return ret;
 	case EN75XX_VOICE_SET_LINEFEED:
 		if (copy_from_user(&linefeed, (void __user *)arg, sizeof(linefeed)))
@@ -218,9 +222,11 @@ static long en75xx_voice_ioctl(struct file *file, unsigned int cmd,
 			return -EINVAL;
 		if (!line->slic_ops->set_linefeed)
 			return -EOPNOTSUPP;
+		mutex_lock(&line->lock);
 		ret = line->slic_ops->set_linefeed(line->slic_priv, linefeed);
 		if (!ret)
 			line->linefeed = linefeed;
+		mutex_unlock(&line->lock);
 		return ret;
 	case EN75XX_VOICE_SET_TONE:
 		if (copy_from_user(&tone, (void __user *)arg, sizeof(tone)))
@@ -264,7 +270,7 @@ static __poll_t en75xx_voice_poll(struct file *file, poll_table *wait)
 	if (ops->poll_wait)
 		ops->poll_wait(line->pcm, line->pcm_channel, file, wait);
 
-	if (vf->event_seq != atomic_read(&line->event_seq))
+	if (READ_ONCE(vf->event_seq) != atomic_read(&line->event_seq))
 		mask |= EPOLLPRI;
 
 	/*
