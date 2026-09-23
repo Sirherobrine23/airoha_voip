@@ -1,0 +1,58 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+
+led="$1"
+[ -d "$led" ] && [ -w "$led/brightness" ] && [ -w "$led/trigger" ] || exit 1
+
+state=
+
+set_led() {
+	[ "$state" = "$1" ] && return
+
+	case "$1" in
+		off)
+			echo none > "$led/trigger"
+			echo 0 > "$led/brightness"
+			;;
+		on)
+			echo none > "$led/trigger"
+			echo 1 > "$led/brightness"
+			;;
+		blink)
+			echo timer > "$led/trigger"
+			echo 500 > "$led/delay_on"
+			echo 500 > "$led/delay_off"
+			;;
+	esac
+
+	state="$1"
+}
+
+trap 'exit 0' INT TERM
+trap 'set_led off' EXIT
+
+set_led off
+
+while :; do
+	if [ "$(uci -q get asterisk.general.enabled)" != 1 ]; then
+		set_led off
+	elif registrations=$(/usr/sbin/asterisk -rx 'pjsip show registrations' 2>/dev/null) &&
+		printf '%s\n' "$registrations" | grep -Eq '[[:space:]]Registered([[:space:]]|$)'; then
+		lines=$(/usr/sbin/asterisk -rx 'en75xx show lines' 2>/dev/null)
+		line_state=$(printf '%s\n' "$lines" | awk '
+			$2 ~ /^\/dev\/en75xx-fxs[0-9]+$/ {
+				found = 1
+				if ($5 == "dialing" || $5 == "ringing" || $5 == "up")
+					active = 1
+			}
+			END {
+				if (active) print "blink"
+				else if (found) print "on"
+				else print "off"
+			}')
+		set_led "$line_state"
+	else
+		set_led off
+	fi
+	sleep 2
+done

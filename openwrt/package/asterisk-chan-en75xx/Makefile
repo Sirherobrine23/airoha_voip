@@ -7,7 +7,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=asterisk-chan-en75xx
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=Sirherobrine23
 
@@ -28,7 +28,7 @@ define Package/asterisk-chan-en75xx/description
  Exposes each /dev/en75xx-fxsN as an Asterisk channel of type EN75XX.
  Handles dial tone, DTMF collection, ring, answer and hangup, so an
  ordinary analog telephone behaves like one. The timing-critical parts
- (hook debounce, ring cadence, G.711 companding) stay in the kernel.
+ (hook polling, ring cadence, G.711 companding) stay in the kernel.
 endef
 
 define Package/asterisk-chan-en75xx/conffiles
@@ -63,8 +63,10 @@ define Build/Compile
 endef
 
 define Package/asterisk-chan-en75xx/install
-	$(INSTALL_DIR) $(1)/etc/init.d $(1)/etc/hotplug.d/misc
+	$(INSTALL_DIR) $(1)/etc/init.d $(1)/etc/hotplug.d/misc $(1)/usr/sbin
 	$(INSTALL_BIN) ./files/en75xx-fxs-perms.init $(1)/etc/init.d/en75xx-fxs-perms
+	$(INSTALL_BIN) ./files/en75xx-fxs-led.init $(1)/etc/init.d/en75xx-fxs-led
+	$(INSTALL_BIN) ./files/en75xx-fxs-led $(1)/usr/sbin/en75xx-fxs-led
 	$(INSTALL_DATA) ./files/50-en75xx-fxs $(1)/etc/hotplug.d/misc/50-en75xx-fxs
 	$(INSTALL_DIR) $(1)/usr/lib/asterisk/modules
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/chan_en75xx.so \

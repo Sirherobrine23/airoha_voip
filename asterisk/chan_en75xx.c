@@ -398,7 +398,7 @@ static void *ss_thread(void *data)
 	start_dialtone(p, chan);
 
 	for (;;) {
-		char digit;
+		int digit;
 
 		digit = ast_waitfordigit(chan, timeout);
 		if (digit < 0) {		/* hangup or error */
@@ -515,12 +515,17 @@ static void start_outgoing_call(struct en75xx_pvt *p)
 
 static void handle_hook_change(struct en75xx_pvt *p, int offhook)
 {
-	ast_mutex_lock(&p->lock);
+	struct ast_channel *chan;
+	int start_call = 0;
 
-	if (offhook == p->offhook) {
-		ast_mutex_unlock(&p->lock);
-		return;
-	}
+	ast_mutex_lock(&p->lock);
+	/* Match chan_dahdi: never wait for a channel while holding its private lock. */
+	while (p->owner && ast_channel_trylock(p->owner))
+		DEADLOCK_AVOIDANCE(&p->lock);
+	chan = p->owner ? ast_channel_ref(p->owner) : NULL;
+
+	if (offhook == p->offhook)
+		goto out;
 	p->offhook = offhook;
 
 	ast_debug(1, "%s: %s\n", p->device, offhook ? "off-hook" : "on-hook");
@@ -531,31 +536,37 @@ static void handle_hook_change(struct en75xx_pvt *p, int offhook)
 			/* answered */
 			line_set_ring(p, 0);
 			p->state = EN75XX_UP;
-			if (p->owner) {
-				ast_queue_control(p->owner,
+			if (chan) {
+				ast_queue_control(chan,
 						  AST_CONTROL_ANSWER);
-				ast_setstate(p->owner, AST_STATE_UP);
+				ast_setstate(chan, AST_STATE_UP);
 			}
 			break;
 		case EN75XX_IDLE:
-			ast_mutex_unlock(&p->lock);
-			start_outgoing_call(p);
-			return;
+			start_call = !chan;
+			break;
 		default:
 			break;
 		}
 	} else {
 		if (p->ringing)
 			line_set_ring(p, 0);
-		if (p->owner) {
-			ast_queue_hangup(p->owner);
+		if (chan) {
+			ast_queue_hangup(chan);
 		} else {
 			p->state = EN75XX_IDLE;
 			line_set_linefeed(p, EN75XX_VOICE_LINEFEED_STANDBY);
 		}
 	}
 
+out:
 	ast_mutex_unlock(&p->lock);
+	if (chan) {
+		ast_channel_unlock(chan);
+		ast_channel_unref(chan);
+	}
+	if (start_call)
+		start_outgoing_call(p);
 }
 
 /* ------------------------------------------------------------------ */

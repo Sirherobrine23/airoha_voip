@@ -17,11 +17,13 @@ fi
 
 kernel_pkg="$openwrt_dir/package/kernel/en75xx-voip"
 asterisk_pkg="$openwrt_dir/package/network/services/asterisk-chan-en75xx"
+bench_pkg="$openwrt_dir/package/utils/en75xx-fxs-bench-test"
 
-mkdir -p "$kernel_pkg" "$asterisk_pkg"
+mkdir -p "$kernel_pkg" "$asterisk_pkg" "$bench_pkg"
 cp -a "$project_dir/openwrt/package/kernel/en75xx-voip/." "$kernel_pkg/"
 cp -a "$project_dir/src" "$project_dir/include" "$project_dir/vendor" \
 	"$project_dir/firmware" "$kernel_pkg/"
 cp -a "$project_dir/openwrt/package/asterisk-chan-en75xx/." "$asterisk_pkg/"
+cp -a "$project_dir/openwrt/package/en75xx-fxs-bench-test/." "$bench_pkg/"
 
-echo "Installed EN75xx kernel and Asterisk packages into $openwrt_dir"
+echo "Installed EN75xx kernel, Asterisk, and bench-test packages into $openwrt_dir"

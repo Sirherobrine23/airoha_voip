@@ -2,7 +2,7 @@
  * chan_en75xx -- Asterisk channel driver for EcoNet/Airoha EN75xx FXS lines.
  *
  * Each /dev/en75xx-fxsN is one analog subscriber line. The kernel side
- * already owns everything that is timing critical: hook debounce, the
+ * already owns most timing-critical work: hook polling, the
  * ring cadence and its gaps, G.711 companding on the wire. What is left
  * here is the analog telephone state machine that chan_dahdi provides
  * for DAHDI spans -- dial tone, digit collection, ring, answer, hangup --
@@ -83,6 +83,10 @@ struct en75xx_pvt {
 	int offhook;
 	int ringing;
 
+	/* Dial-tone notch filter state for DTMF detection during dialing */
+	int16_t notch_x1, notch_x2;
+	int16_t notch_y1, notch_y2;
+
 	struct ast_dsp *dsp;
 	struct ast_frame frame;
 	unsigned char buf[AST_FRIENDLY_OFFSET + EN75XX_FRAME_BYTES];
@@ -99,7 +103,17 @@ struct en75xx_pvt {
 	char mohinterpret[MAX_MUSICCLASS];
 	unsigned int immediate:1;
 	unsigned int hwdtmf:1;		/* trust the SLIC for DTMF */
+	unsigned int relaxdtmf:1;	/* relaxed DTMF detection rules */
+	unsigned int play_dialtone:1;	/* play dial tone on off-hook */
+	unsigned int hwtone:1;		/* let the SLIC generate the dial tone */
+	unsigned int tone_playing:1;	/* a SLIC oscillator is running */
 	unsigned int inuse:1;
+	unsigned int caps;		/* EN75XX_VOICE_CAP_* from the driver */
+	int dialtone_volume;		/* software dial tone amplitude */
+	int callprogress_volume;	/* software call progress tone amplitude */
+	int dialtone_freq1;		/* hardware dial tone, Hz */
+	int dialtone_freq2;		/* second oscillator, 0 for a pure tone */
+	int dialtone_level;		/* hardware dial tone level, dBm */
 };
 
 static struct en75xx_pvt lines[EN75XX_MAX_LINES];
@@ -118,6 +132,7 @@ static int en75xx_call(struct ast_channel *ast, const char *dest, int timeout);
 static int en75xx_hangup(struct ast_channel *ast);
 static int en75xx_answer(struct ast_channel *ast);
 static struct ast_frame *en75xx_read(struct ast_channel *ast);
+static struct ast_frame *en75xx_exception(struct ast_channel *ast);
 static int en75xx_write(struct ast_channel *ast, struct ast_frame *frame);
 static int en75xx_indicate(struct ast_channel *ast, int condition,
 			   const void *data, size_t datalen);
@@ -134,16 +149,24 @@ static struct ast_channel_tech en75xx_tech = {
 	.answer = en75xx_answer,
 	.read = en75xx_read,
 	.write = en75xx_write,
+	.exception = en75xx_exception,
 	.indicate = en75xx_indicate,
 	.fixup = en75xx_fixup,
 	.send_digit_end = en75xx_digit_end,
 };
 
 /*
- * Tones come from the channel's tone zone (indications.conf), so a
- * Brazilian zone gets Brazilian dial tone without touching this file.
+ * Software tones come from the channel's tone zone (indications.conf).
+ * Hardware dial tone uses the configured oscillator frequencies instead.
+ *
+ * vol is passed straight through to ast_playtones_start() (0 -> its
+ * own default, -8dBm full scale). Dial tone specifically is played
+ * quieter than that (see ss_thread()) because it reflects across the
+ * 2-wire hybrid into the mic RX stream for as long as it plays, and
+ * at full scale that reflection is loud enough to defeat the Goertzel
+ * DTMF detector on the first digit.
  */
-static int play_tone(struct ast_channel *chan, const char *name)
+static int play_tone_vol(struct ast_channel *chan, const char *name, int vol)
 {
 	struct ast_tone_zone_sound *ts;
 	int res;
@@ -154,9 +177,104 @@ static int play_tone(struct ast_channel *chan, const char *name)
 		return -1;
 	}
 
-	res = ast_playtones_start(chan, 0, ts->data, 0);
+	/*
+	 * When vol <= 0, Asterisk defaults to 7219 (-8 dBm).
+	 * Calibrate unspecified call progress tones (busy, congestion) to a comfortable 5000 (-16 dBFS).
+	 */
+	if (vol <= 0)
+		vol = 5000;
+
+	ast_verb(2, "%s: play_tone '%s' [zone=%s, data='%s', vol=%d]\n",
+		 ast_channel_name(chan), name,
+		 ast_channel_zone(chan) ? ast_channel_zone(chan)->country : "default",
+		 ts->data, vol);
+
+	res = ast_playtones_start(chan, vol, ts->data, 0);
 	ts = ast_tone_zone_sound_unref(ts);
 	return res;
+}
+
+static int play_tone(struct ast_channel *chan, const char *name)
+{
+	struct en75xx_pvt *p = ast_channel_tech_pvt(chan);
+	int vol = (p && p->callprogress_volume > 0) ? p->callprogress_volume : 800;
+	return play_tone_vol(chan, name, vol);
+}
+
+/*
+ * Dial tone. When the SLIC can play it from its own oscillators
+ * (EN75XX_VOICE_CAP_TONE), that beats synthesising it here: a
+ * continuous software tone has Asterisk building and writing a 10 ms
+ * frame every 10 ms for as long as the handset sits off-hook and
+ * undialled, which on this soft-float MIPS part was enough to starve
+ * its own canary thread. The tone reaches the line the same way either
+ * way, so it still reflects across the 2-wire hybrid and the notch in
+ * en75xx_read() is still what makes the first digit detectable.
+ */
+static void start_dialtone(struct en75xx_pvt *p, struct ast_channel *chan)
+{
+	struct en75xx_voice_tone tone = {
+		.freq1_hz = p->dialtone_freq1 > 0 ? p->dialtone_freq1 : 0,
+		.freq2_hz = p->dialtone_freq2 > 0 ? p->dialtone_freq2 : 0,
+		.level_dbm = p->dialtone_level < 0 ? p->dialtone_level : 0,
+	};
+
+	if (!p->play_dialtone) {
+		ast_verb(2, "%s: play_dialtone disabled, line silent\n",
+			 p->device);
+		return;
+	}
+
+	if (p->hwtone && (p->caps & EN75XX_VOICE_CAP_TONE) &&
+	    p->dialtone_freq1 > 0) {
+		if (!ioctl(p->fd, EN75XX_VOICE_SET_TONE, &tone)) {
+			p->tone_playing = 1;
+			ast_verb(2, "%s: SLIC dial tone %u+%u Hz at %d dBm\n",
+				 p->device, tone.freq1_hz, tone.freq2_hz,
+				 tone.level_dbm);
+			return;
+		}
+		ast_log(LOG_WARNING,
+			"%s: SLIC dial tone failed (%s), using software\n",
+			p->device, strerror(errno));
+	}
+
+	if (play_tone_vol(chan, "dial",
+			  p->dialtone_volume > 0 ? p->dialtone_volume : 3500))
+		ast_log(LOG_WARNING, "%s: no dial tone\n", p->device);
+}
+
+/*
+ * Automatic level control tracks speech, and dial tone and DTMF are not
+ * speech. Left running while digits are collected, the loop adapts down
+ * against the continuous dial tone reflecting through the 2-wire hybrid
+ * and buries the digits that follow. The vendor gates its own autogain
+ * the same way -- it carries a per-line enable flag and is switched off
+ * during fax negotiation. Suspend it for the switch, restore it once
+ * there is a real conversation to level.
+ */
+static void line_set_alc(struct en75xx_pvt *p, int enable)
+{
+	uint32_t val = !!enable;
+
+	if (ioctl(p->fd, EN75XX_VOICE_SET_ALC, &val) && errno != EOPNOTSUPP)
+		ast_debug(2, "%s: SET_ALC %u failed: %s\n", p->device, val,
+			  strerror(errno));
+}
+
+static void stop_dialtone(struct en75xx_pvt *p, struct ast_channel *chan)
+{
+	if (p->tone_playing) {
+		struct en75xx_voice_tone silence = { 0 };
+
+		if (!ioctl(p->fd, EN75XX_VOICE_SET_TONE, &silence))
+			p->tone_playing = 0;
+		else
+			ast_log(LOG_WARNING, "%s: cannot stop SLIC tone: %s\n",
+				p->device, strerror(errno));
+	}
+	if (chan)
+		ast_playtones_stop(chan);
 }
 
 /* ------------------------------------------------------------------ */
@@ -279,15 +397,16 @@ static void *ss_thread(void *data)
 	ast_verb(3, "%s: off-hook, collecting digits in context '%s'\n",
 		 p->device, p->context);
 
-	if (play_tone(chan, "dial"))
-		ast_log(LOG_WARNING, "%s: no dial tone\n", p->device);
+	line_set_alc(p, 0);
+	start_dialtone(p, chan);
 
 	for (;;) {
-		char digit;
+		int digit;
 
 		digit = ast_waitfordigit(chan, timeout);
 		if (digit < 0) {		/* hangup or error */
-			ast_playtones_stop(chan);
+			stop_dialtone(p, chan);
+			line_set_alc(p, 1);
 			ast_hangup(chan);
 			return NULL;
 		}
@@ -299,7 +418,7 @@ static void *ss_thread(void *data)
 		}
 
 		if (len == 0)
-			ast_playtones_stop(chan);
+			stop_dialtone(p, chan);
 
 		if (len < (int)sizeof(exten) - 1) {
 			exten[len++] = digit;
@@ -325,6 +444,7 @@ static void *ss_thread(void *data)
 				 p->device, exten, p->context);
 			ast_indicate(chan, AST_CONTROL_CONGESTION);
 			ast_safe_sleep(chan, 3000);
+			line_set_alc(p, 1);
 			ast_hangup(chan);
 			return NULL;
 		}
@@ -332,7 +452,7 @@ static void *ss_thread(void *data)
 		timeout = INTER_DIGIT_TIMEOUT;
 	}
 
-	ast_playtones_stop(chan);
+	stop_dialtone(p, chan);
 
 	if (!len || !ast_exists_extension(chan, p->context, exten, 1,
 					  p->cid_num)) {
@@ -344,6 +464,7 @@ static void *ss_thread(void *data)
 
 	ast_channel_exten_set(chan, exten);
 	ast_setstate(chan, AST_STATE_RING);
+	line_set_alc(p, 1);
 	line_flush(p);
 
 	res = ast_pbx_run(chan);
@@ -370,6 +491,8 @@ static void start_outgoing_call(struct en75xx_pvt *p)
 	}
 
 	p->state = EN75XX_DIALING;
+	p->notch_x1 = p->notch_x2 = 0;
+	p->notch_y1 = p->notch_y2 = 0;
 
 	if (p->immediate) {
 		/* skip the switch entirely and go straight to the dialplan */
@@ -395,12 +518,17 @@ static void start_outgoing_call(struct en75xx_pvt *p)
 
 static void handle_hook_change(struct en75xx_pvt *p, int offhook)
 {
-	ast_mutex_lock(&p->lock);
+	struct ast_channel *chan;
+	int start_call = 0;
 
-	if (offhook == p->offhook) {
-		ast_mutex_unlock(&p->lock);
-		return;
-	}
+	ast_mutex_lock(&p->lock);
+	/* Match chan_dahdi: never wait for a channel while holding its private lock. */
+	while (p->owner && ast_channel_trylock(p->owner))
+		DEADLOCK_AVOIDANCE(&p->lock);
+	chan = p->owner ? ast_channel_ref(p->owner) : NULL;
+
+	if (offhook == p->offhook)
+		goto out;
 	p->offhook = offhook;
 
 	ast_debug(1, "%s: %s\n", p->device, offhook ? "off-hook" : "on-hook");
@@ -411,31 +539,37 @@ static void handle_hook_change(struct en75xx_pvt *p, int offhook)
 			/* answered */
 			line_set_ring(p, 0);
 			p->state = EN75XX_UP;
-			if (p->owner) {
-				ast_queue_control(p->owner,
+			if (chan) {
+				ast_queue_control(chan,
 						  AST_CONTROL_ANSWER);
-				ast_setstate(p->owner, AST_STATE_UP);
+				ast_setstate(chan, AST_STATE_UP);
 			}
 			break;
 		case EN75XX_IDLE:
-			ast_mutex_unlock(&p->lock);
-			start_outgoing_call(p);
-			return;
+			start_call = !chan;
+			break;
 		default:
 			break;
 		}
 	} else {
 		if (p->ringing)
 			line_set_ring(p, 0);
-		if (p->owner) {
-			ast_queue_hangup(p->owner);
+		if (chan) {
+			ast_queue_hangup(chan);
 		} else {
 			p->state = EN75XX_IDLE;
 			line_set_linefeed(p, EN75XX_VOICE_LINEFEED_STANDBY);
 		}
 	}
 
+out:
 	ast_mutex_unlock(&p->lock);
+	if (chan) {
+		ast_channel_unlock(chan);
+		ast_channel_unref(chan);
+	}
+	if (start_call)
+		start_outgoing_call(p);
 }
 
 /* ------------------------------------------------------------------ */
@@ -620,6 +754,9 @@ static int en75xx_hangup(struct ast_channel *ast)
 
 	if (p->ringing)
 		line_set_ring(p, 0);
+	/* an oscillator left running would sing on into the next call */
+	stop_dialtone(p, NULL);
+	line_set_alc(p, 1);
 	line_flush(p);
 
 	/*
@@ -692,10 +829,64 @@ static struct ast_frame *en75xx_read(struct ast_channel *ast)
 	 * ast_dsp_process rewrites the frame into an AST_FRAME_DTMF
 	 * when it finds one, which is what ast_waitfordigit consumes.
 	 */
-	if (p->dsp && !p->hwdtmf)
+	if (p->dsp && !p->hwdtmf) {
+		/*
+			 * When off-hook and collecting digits (EN75XX_DIALING), dial tone
+			 * reflects across the 2-wire hybrid back into
+		 * RX. Asterisk's Goertzel DTMF detector requires
+		 * (E_row + E_col) > 42.0 * E_total. The 400 Hz reflection inflates
+		 * E_total, preventing detection of the first dialed digit.
+			 * Passing the audio to ast_dsp_process through a biquad notch
+		 * filter removes the reflected dial tone and restores DTMF detection.
+		 */
+		if (p->state == EN75XX_DIALING && p->play_dialtone &&
+		    !p->dialtone_freq2 &&
+		    (p->dialtone_freq1 == 400 || p->dialtone_freq1 == 425)) {
+			int16_t *samp = (int16_t *)(p->buf + AST_FRIENDLY_OFFSET);
+			/* Q14 notch at 8 kHz, Q=3.0, for the selected dial tone. */
+			const int32_t b0 = p->dialtone_freq1 == 425 ? 15536 : 15582;
+			const int32_t b1 = p->dialtone_freq1 == 425 ? -29356 : -29638;
+			const int32_t a2 = p->dialtone_freq1 == 425 ? 14687 : 14779;
+			int i;
+
+			for (i = 0; i < EN75XX_FRAME_SAMPLES; i++) {
+				int32_t x0 = samp[i];
+				int64_t acc = (int64_t)b0 * x0 + (int64_t)b1 * p->notch_x1 +
+					    (int64_t)b0 * p->notch_x2 - (int64_t)b1 * p->notch_y1 -
+					    (int64_t)a2 * p->notch_y2;
+				int32_t y0 = acc >> 14;
+				if (y0 > 32767) y0 = 32767;
+				else if (y0 < -32768) y0 = -32768;
+
+				p->notch_x2 = p->notch_x1;
+				p->notch_x1 = x0;
+				p->notch_y2 = p->notch_y1;
+				p->notch_y1 = y0;
+				samp[i] = (int16_t)y0;
+			}
+		}
+
 		f = ast_dsp_process(ast, p->dsp, f);
 
+		if (f && (f->frametype == AST_FRAME_DTMF_END || f->frametype == AST_FRAME_DTMF_BEGIN)) {
+			ast_verb(2, "%s: DTMF %s '%c'\n", p->device,
+				 (f->frametype == AST_FRAME_DTMF_BEGIN) ? "begin" : "end",
+				 f->subclass.integer);
+		}
+	}
+
 	return f;
+}
+
+static struct ast_frame *en75xx_exception(struct ast_channel *ast)
+{
+	/*
+	 * Exception flag is raised on POLLPRI (hook change event).
+	 * Do not consume the event here via line_get_state(), as monitor_loop
+	 * owns hook state transitions. Simply return null frame to suppress
+	 * Asterisk core's "no exception handler" warning.
+	 */
+	return &ast_null_frame;
 }
 
 static int en75xx_write(struct ast_channel *ast, struct ast_frame *frame)
@@ -828,6 +1019,7 @@ static void line_close(struct en75xx_pvt *p)
 static int line_open(struct en75xx_pvt *p)
 {
 	struct en75xx_voice_info info;
+	struct en75xx_voice_line_state state;
 
 	p->fd = open(p->device, O_RDWR | O_NONBLOCK);
 	if (p->fd < 0) {
@@ -855,10 +1047,14 @@ static int line_open(struct en75xx_pvt *p)
 			p->device, info.sample_rate, info.sample_bits);
 		goto err;
 	}
+	p->caps = info.capabilities;
 
 	ast_copy_string(p->slic, info.slic, sizeof(p->slic));
 
 	if (!p->hwdtmf) {
+		int digitmode = DSP_DIGITMODE_DTMF;
+		if (p->relaxdtmf)
+			digitmode |= DSP_DIGITMODE_RELAXDTMF;
 		p->dsp = ast_dsp_new();
 		if (!p->dsp) {
 			ast_log(LOG_ERROR, "%s: cannot allocate DSP\n",
@@ -866,10 +1062,13 @@ static int line_open(struct en75xx_pvt *p)
 			goto err;
 		}
 		ast_dsp_set_features(p->dsp, DSP_FEATURE_DIGIT_DETECT);
-		ast_dsp_set_digitmode(p->dsp, DSP_DIGITMODE_DTMF);
+		ast_dsp_set_digitmode(p->dsp, digitmode);
 	}
 
-	line_set_linefeed(p, EN75XX_VOICE_LINEFEED_STANDBY);
+	if (line_set_linefeed(p, EN75XX_VOICE_LINEFEED_STANDBY) ||
+	    line_get_state(p, &state))
+		goto err;
+	p->offhook = state.hook == EN75XX_VOICE_OFFHOOK;
 
 	ast_verb(2, "EN75XX line %d on %s (SLIC %s)\n", p->index, p->device,
 		 p->slic);
@@ -922,6 +1121,14 @@ static int load_config(int reload)
 			 p->index);
 		ast_copy_string(p->context, "default", sizeof(p->context));
 		ast_copy_string(p->exten, "s", sizeof(p->exten));
+		p->relaxdtmf = 1;
+		p->play_dialtone = 1;
+		p->hwtone = 0;
+		p->dialtone_volume = 3500;
+		p->callprogress_volume = 5000;
+		p->dialtone_freq1 = 0;
+		p->dialtone_freq2 = 0;
+		p->dialtone_level = -18;
 
 		for (v = ast_variable_browse(cfg, cat); v; v = v->next) {
 			if (!strcasecmp(v->name, "device"))
@@ -948,6 +1155,22 @@ static int load_config(int reload)
 				p->immediate = ast_true(v->value);
 			else if (!strcasecmp(v->name, "hardware_dtmf"))
 				p->hwdtmf = ast_true(v->value);
+			else if (!strcasecmp(v->name, "relaxdtmf"))
+				p->relaxdtmf = ast_true(v->value);
+			else if (!strcasecmp(v->name, "play_dialtone"))
+				p->play_dialtone = ast_true(v->value);
+			else if (!strcasecmp(v->name, "dialtone_volume"))
+				p->dialtone_volume = atoi(v->value);
+			else if (!strcasecmp(v->name, "callprogress_volume"))
+				p->callprogress_volume = atoi(v->value);
+			else if (!strcasecmp(v->name, "hardware_tones"))
+				p->hwtone = ast_true(v->value);
+			else if (!strcasecmp(v->name, "dialtone_freq1"))
+				p->dialtone_freq1 = atoi(v->value);
+			else if (!strcasecmp(v->name, "dialtone_freq2"))
+				p->dialtone_freq2 = atoi(v->value);
+			else if (!strcasecmp(v->name, "dialtone_level"))
+				p->dialtone_level = atoi(v->value);
 			else
 				ast_log(LOG_WARNING,
 					"[%s]: unknown option '%s'\n", cat,
