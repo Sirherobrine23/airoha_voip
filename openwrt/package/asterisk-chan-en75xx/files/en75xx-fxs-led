@@ -3,8 +3,30 @@
 
 led="$1"
 [ -d "$led" ] && [ -w "$led/brightness" ] && [ -w "$led/trigger" ] || exit 1
+max_brightness=$(cat "$led/max_brightness")
 
 state=
+
+sip_ready() {
+	local registrations contacts mode
+
+	mode=$(uci -q get asterisk.general.fxs_led_registration)
+	if [ "$mode" != contacts ]; then
+		registrations=$(/usr/sbin/asterisk -rx 'pjsip show registrations' 2>/dev/null) || return 1
+		if printf '%s\n' "$registrations" | grep -Eq '[[:space:]]Registered([[:space:]]|$)'; then
+			return 0
+		fi
+		[ "$mode" = outbound ] && return 1
+		case "$registrations" in
+			*'No objects found'*|*"No such command 'pjsip show registrations'"*) ;;
+			*) return 1 ;;
+		esac
+	fi
+
+	contacts=$(/usr/sbin/asterisk -rx 'pjsip show contacts' 2>/dev/null) || return 1
+	printf '%s\n' "$contacts" |
+		grep -Eq '^[[:space:]]*Contact:.*[[:space:]](Avail|NonQual)[[:space:]]'
+}
 
 set_led() {
 	[ "$state" = "$1" ] && return
@@ -16,7 +38,7 @@ set_led() {
 			;;
 		on)
 			echo none > "$led/trigger"
-			echo 1 > "$led/brightness"
+			echo "$max_brightness" > "$led/brightness"
 			;;
 		blink)
 			echo timer > "$led/trigger"
@@ -34,10 +56,13 @@ trap 'set_led off' EXIT
 set_led off
 
 while :; do
-	if [ "$(uci -q get asterisk.general.enabled)" != 1 ]; then
+	case "$(uci -q get asterisk.general.enabled)" in
+		0|false|no) enabled=0 ;;
+		*) enabled=1 ;;
+	esac
+	if [ "$enabled" = 0 ]; then
 		set_led off
-	elif registrations=$(/usr/sbin/asterisk -rx 'pjsip show registrations' 2>/dev/null) &&
-		printf '%s\n' "$registrations" | grep -Eq '[[:space:]]Registered([[:space:]]|$)'; then
+	elif sip_ready; then
 		lines=$(/usr/sbin/asterisk -rx 'en75xx show lines' 2>/dev/null)
 		line_state=$(printf '%s\n' "$lines" | awk '
 			$2 ~ /^\/dev\/en75xx-fxs[0-9]+$/ {

@@ -11,9 +11,9 @@
 
 [line0]
 ; device      = /dev/en75xx-fxs0   ; default is /dev/en75xx-fxs<N>
-context       = fxs                ; where off-hook digits are matched
-callerid      = "Phone 1" <1001>
-language      = pt_BR
+; context     = default            ; where off-hook digits are matched
+; callerid    = "Phone 1" <1001>
+; language    = pt_BR              ; otherwise use Asterisk's default
 
 ; immediate=yes skips dial tone and digit collection entirely and jumps
 ; straight to extension "s" in the context. Useful for a hot line.
@@ -25,23 +25,20 @@ immediate     = no
 ; this platform, so the tones have to be pulled out of the audio.
 hardware_dtmf = no
 
-; Dial tone. hardware_tones=yes plays it from the SLIC's own oscillators
-; instead of synthesising it in Asterisk, which keeps a continuous tone
-; off the CPU for as long as the handset sits off-hook and undialled.
-; It needs a SLIC that advertises the capability; otherwise, and when
-; hardware_tones=no, the tone comes from the channel's indications.conf
-; zone at dialtone_volume instead.
-hardware_tones     = yes
-dialtone_freq1     = 400           ; Hz; 400 continuous is the Indian tone
-dialtone_freq2     = 0             ; second oscillator, 0 for a pure tone
-dialtone_level     = -18           ; dBm, per oscillator
+; Dial tone comes from the channel's indications.conf zone. A continuous
+; one- or two-frequency tone uses the SLIC oscillator when supported;
+; cadenced or modulated tones use Asterisk's software generator.
+; hardware_tones   = no            ; force software even if supported
+; dialtone_freq1   = 400           ; optional hardware frequency override
+; dialtone_freq2   = 0             ; optional second oscillator
+; dialtone_level   = -18           ; hardware output, dBm per oscillator
 ; play_dialtone    = yes           ; no leaves the line silent off-hook
-; dialtone_volume  = 3500          ; software dial tone, 0..32767
-; callprogress_volume = 5000       ; software busy/congestion/ringback
+; dialtone_volume  = 0             ; 0 uses Asterisk's default volume
+; callprogress_volume = 0          ; 0 uses Asterisk's default volume
 
 ; mohinterpret = default
 
-[line1]
-context       = fxs
-callerid      = "Phone 2" <1002>
-language      = pt_BR
+;[line1]
+;context      = default
+;callerid     = "Phone 2" <1002>
+;language     = pt_BR

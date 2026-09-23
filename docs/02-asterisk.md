@@ -14,7 +14,7 @@ that already exists and already carries 10 ms frames. The state machine
 DAHDI would be pure overhead on a router with 2 FXS ports.
 
 The split is: anything timing critical stays in the kernel — hook
-debounce, ring cadence and its silent gaps, G.711 companding — and
+polling, ring cadence and its silent gaps, G.711 companding — and
 Asterisk only sees 8 kHz signed-linear audio plus four ioctls.
 
 ## Threads
@@ -67,25 +67,32 @@ Matches the `chan_dahdi` defaults: 16 s for the first digit, 8 s between
 digits, and 3 s after a match when a longer extension could still match,
 so a dialplan with both `1` and `100` behaves sanely.
 
-## Dial tone volume vs. DTMF detection
+## Dial tone and DTMF detection
 
-Dial tone plays continuously from off-hook until the first recognized
-digit, so on a hybrid with mediocre return loss it reflects into the mic
-path for as long as the line sits off-hook and idle. At Asterisk's default
-full-scale amplitude that reflection can raise the DTMF detector's
-total-energy floor enough to miss the first digit. `dialtone_volume` and
-`callprogress_volume` in `en75xx.conf` (see the sample) let dial tone run
-quieter than busy/congestion/ring without touching indications.conf or
-Asterisk core. The shipped defaults are a starting point, not a
-calibrated value; retune per hybrid if dialing is unreliable.
+The active Asterisk tone zone supplies the dial-tone frequencies. If the
+line driver advertises a tone generator and the zone specifies a continuous
+single or dual tone, the SLIC plays it; otherwise Asterisk plays the zone's
+full tone pattern. `hardware_tones=no` forces software playback. Optional
+frequency and level overrides remain available in `en75xx.conf`.
 
-While `state == EN75XX_DIALING`, `en75xx_read()` also runs incoming audio
-through a fixed 400 Hz notch (the frequency Asterisk's own default `dial`
-tone data uses) before handing it to `ast_dsp_process()`, to strip
-whatever dial-tone reflection survives the lower volume. The filter is
-bypassed once dialing ends, so it never touches voice on an active call.
-If a zone's dial tone uses a different frequency, the notch coefficients
-need retuning to match.
+Dial tone can reflect through the hybrid into the receive path and mask
+the first DTMF digit. During digit collection, the channel driver derives
+up to two notch filters from the frequencies it actually plays. The filters
+are removed before the conversation begins. Software tone volume defaults
+to Asterisk's own value; `dialtone_volume` and `callprogress_volume` can
+override it for a particular line if measurements require that.
+
+## FXS status LED
+
+The base Asterisk package drives LEDs whose device-tree function is `voip`.
+It leaves the LED off while Asterisk is disabled or SIP is unavailable, on
+while SIP is ready, and blinking while a line is dialing, ringing or in a
+call. If outbound registrations exist, one must be `Registered`; otherwise
+an available inbound PJSIP contact is accepted. Boards with a differently
+named phone LED can set `asterisk.general.fxs_led` to its sysfs LED name.
+`asterisk.general.fxs_led_registration` may be set to `outbound` or
+`contacts` to choose a specific SIP topology. No LED is required for the
+channel driver to operate.
 
 ## Installing
 

@@ -48,6 +48,7 @@ TARGET_CFLAGS += \
 	-I$(UAPI_DIR) \
 	-fPIC -D_GNU_SOURCE -DAST_MODULE=\"chan_en75xx\" \
 	-DAST_MODULE_SELF_SYM=__internal_chan_en75xx_self
+TARGET_LDFLAGS += -lm
 
 define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)
@@ -59,7 +60,7 @@ endef
 define Build/Compile
 	$(TARGET_CC) $(TARGET_CFLAGS) -shared -o \
 		$(PKG_BUILD_DIR)/chan_en75xx.so \
-		$(PKG_BUILD_DIR)/chan_en75xx.c
+		$(PKG_BUILD_DIR)/chan_en75xx.c $(TARGET_LDFLAGS)
 endef
 
 define Package/asterisk-chan-en75xx/install

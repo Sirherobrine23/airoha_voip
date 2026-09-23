@@ -25,19 +25,16 @@ immediate     = no
 ; this platform, so the tones have to be pulled out of the audio.
 hardware_dtmf = no
 
-; Dial tone. hardware_tones=yes plays it from the SLIC's own oscillators
-; instead of synthesising it in Asterisk, which keeps a continuous tone
-; off the CPU for as long as the handset sits off-hook and undialled.
-; It needs a SLIC that advertises the capability; otherwise, and when
-; hardware_tones=no, the tone comes from the channel's indications.conf
-; zone at dialtone_volume instead.
-; hardware_tones   = yes           ; opt in when the SLIC supports it
-; dialtone_freq1   = 400           ; example: 400 Hz continuous
-; dialtone_freq2   = 0             ; second oscillator, 0 for a pure tone
-; dialtone_level   = -18           ; dBm, per oscillator
+; Dial tone comes from the channel's indications.conf zone. A continuous
+; one- or two-frequency tone uses the SLIC oscillator when supported;
+; cadenced or modulated tones use Asterisk's software generator.
+; hardware_tones   = no            ; force software even if supported
+; dialtone_freq1   = 400           ; optional hardware frequency override
+; dialtone_freq2   = 0             ; optional second oscillator
+; dialtone_level   = -18           ; hardware output, dBm per oscillator
 ; play_dialtone    = yes           ; no leaves the line silent off-hook
-; dialtone_volume  = 3500          ; software dial tone, 0..32767
-; callprogress_volume = 5000       ; software busy/congestion/ringback
+; dialtone_volume  = 0             ; 0 uses Asterisk's default volume
+; callprogress_volume = 0          ; 0 uses Asterisk's default volume
 
 ; mohinterpret = default
 
