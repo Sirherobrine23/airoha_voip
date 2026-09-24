@@ -147,7 +147,8 @@ struct en75xx_pcm_soc_data {
 	unsigned int ring_count;
 	size_t desc_size;
 	u32 ring_cfg;
-	u32 dma_mask;
+	u64 dma_mask;		/* mask advertised to the DMA API */
+	u32 dma_addr_mask;	/* address bits carried by a descriptor */
 	u32 dma_or;
 	u8 channel_mask;
 	bool pcm_v2;		/* EN7523: 12-byte descriptor, CHAN_ENABLE */
@@ -262,8 +263,11 @@ static inline void pcm_write(struct en75xx_pcm_dev *pcm, u32 reg, u32 val)
 
 static u32 en75xx_pcm_dma_addr(struct en75xx_pcm_dev *pcm, dma_addr_t addr)
 {
-	WARN_ON_ONCE((u64)addr & ~(u64)pcm->soc->dma_mask);
-	return (lower_32_bits(addr) & pcm->soc->dma_mask) | pcm->soc->dma_or;
+	u64 allowed = (u64)pcm->soc->dma_addr_mask | pcm->soc->dma_or;
+
+	WARN_ON_ONCE((u64)addr & ~allowed);
+	return (lower_32_bits(addr) & pcm->soc->dma_addr_mask) |
+		pcm->soc->dma_or;
 }
 
 static bool en75xx_pcm_dma_range_valid(struct en75xx_pcm_dev *pcm,
@@ -271,12 +275,12 @@ static bool en75xx_pcm_dma_range_valid(struct en75xx_pcm_dev *pcm,
 {
 	u64 first = addr;
 	u64 last;
+	u64 allowed = (u64)pcm->soc->dma_addr_mask | pcm->soc->dma_or;
 
 	if (!size)
 		return false;
 	last = first + size - 1;
-	return last >= first && !(first & ~(u64)pcm->soc->dma_mask) &&
-		!(last & ~(u64)pcm->soc->dma_mask);
+	return last >= first && !(first & ~allowed) && !(last & ~allowed);
 }
 
 static void en75xx_pcm_hw_stop(struct en75xx_pcm_dev *pcm)
@@ -1280,7 +1284,9 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 
 	ret = dma_set_mask_and_coherent(dev, pcm->soc->dma_mask);
 	if (ret)
-		return ret;
+		return dev_err_probe(dev, ret,
+				     "cannot configure DMA mask %#llx\n",
+				     (unsigned long long)pcm->soc->dma_mask);
 
 	ring_size = pcm->soc->ring_count * pcm->soc->desc_size;
 	pcm->tx_ring = dmam_alloc_coherent(dev, ring_size, &pcm->tx_ring_dma,
@@ -1288,7 +1294,8 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 	pcm->rx_ring = dmam_alloc_coherent(dev, ring_size, &pcm->rx_ring_dma,
 					    GFP_KERNEL);
 	if (!pcm->tx_ring || !pcm->rx_ring)
-		return -ENOMEM;
+		return dev_err_probe(dev, -ENOMEM,
+				     "cannot allocate coherent descriptor rings\n");
 
 	buf_size = pcm->soc->ring_count * EN75XX_PCM_FRAME_STRIDE;
 	pcm->tx_buf = dmam_alloc_coherent(dev, buf_size, &pcm->tx_buf_dma,
@@ -1296,7 +1303,8 @@ static int en75xx_pcm_probe(struct platform_device *pdev)
 	pcm->rx_buf = dmam_alloc_coherent(dev, buf_size, &pcm->rx_buf_dma,
 					   GFP_KERNEL);
 	if (!pcm->tx_buf || !pcm->rx_buf)
-		return -ENOMEM;
+		return dev_err_probe(dev, -ENOMEM,
+				     "cannot allocate coherent PCM buffers\n");
 	if (!en75xx_pcm_dma_range_valid(pcm, pcm->tx_ring_dma, ring_size) ||
 	    !en75xx_pcm_dma_range_valid(pcm, pcm->rx_ring_dma, ring_size) ||
 	    !en75xx_pcm_dma_range_valid(pcm, pcm->tx_buf_dma, buf_size) ||
@@ -1392,6 +1400,7 @@ static const struct en75xx_pcm_soc_data en751221_pcm_data = {
 	 */
 	.ring_cfg = 0x9f,
 	.dma_mask = 0x1fffffff,
+	.dma_addr_mask = 0x1fffffff,
 	.channel_mask = GENMASK(7, 0),
 };
 
@@ -1401,6 +1410,7 @@ static const struct en75xx_pcm_soc_data en7528_pcm_data = {
 	.desc_size = sizeof(struct en75xx_pcm_desc_v1),
 	.ring_cfg = 0x9f,
 	.dma_mask = 0x1fffffff,
+	.dma_addr_mask = 0x1fffffff,
 	.channel_mask = GENMASK(7, 0),
 	.swap_samples = true,
 };
@@ -1410,7 +1420,14 @@ static const struct en75xx_pcm_soc_data en7523_pcm_data = {
 	.ring_count = EN75XX_PCM_RING_COUNT,
 	.desc_size = sizeof(struct en75xx_pcm_desc_v2),
 	.ring_cfg = 0x3f,
-	.dma_mask = 0x3fffffff,
+	/*
+	 * EN7523 RAM lives at 0x80000000, so a 30-bit DMA API mask makes
+	 * dma_set_mask_and_coherent() reject every usable allocation.  The
+	 * controller itself still carries a 30-bit payload in each descriptor
+	 * and requires bit 31 set; keep those two representations separate.
+	 */
+	.dma_mask = DMA_BIT_MASK(32),
+	.dma_addr_mask = 0x3fffffff,
 	.dma_or = 0x80000000,
 	.channel_mask = GENMASK(3, 0),
 	.pcm_v2 = true,
