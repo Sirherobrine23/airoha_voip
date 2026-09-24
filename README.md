@@ -46,6 +46,15 @@ still needs per-board electrical and runtime validation.
 | MaxLinear PEF32001/PEF32002 (DUSLIC-XS)           | official GPL driver imported; CIBB12/R600 BBD identified; EN75xx voice bridge and hardware validation pending        |
 | Asterisk channel driver                           | draft implementation; build/runtime testing against the target Asterisk version required                             |
 
+### Status Boards
+
+- [ ] EN751221: Nokia G-240G-E (Maxlinear PEF32002 / `maxlinear,pef3200x`)
+- [x] EN7528: TP-Link XC220-G3v v1 (Si32192FM1 / `silabs,si32192`)
+- [ ] EN7580: Nokia XS-2426G-A (Maxlinear PEF32002 / `maxlinear,pef3200x`)
+- [ ] EN7523: TP-Link XX230V v1 and XX530V v1 (Si32192FM1 / `silabs,si32192`)
+- [ ] EN7523: MitraStar GPT-2742GX4X5v6 (Maxlinear PEF32001 / `maxlinear,pef3200x`)
+- [ ] EN7523: Askey rtf8225vw (Maxlinear PEF32001 / `maxlinear,pef3200x`)
+
 ## Two SLIC families, two transports
 
 The Le9642 is **not** an SPI device. ZSI multiplexes its control channel
