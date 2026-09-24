@@ -119,7 +119,7 @@ define Build/Configure
 			--build=$(GNU_HOST_NAME) \
 			--host=$(GNU_TARGET_NAME) \
 			--target=$(GNU_TARGET_NAME) \
-			--with-kernel-incl=$(LINUX_DIR) \
+			--with-kernel-incl=$(LINUX_DIR)/include \
 			--with-kernel-build=$(LINUX_DIR) \
 			--with-kernel-module \
 			--enable-tapi3 \

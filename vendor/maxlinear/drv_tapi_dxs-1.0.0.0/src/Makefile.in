@@ -597,9 +597,10 @@ libdrvdxs_additional_cflags = \
 @WARNINGS_TRUE@	-Wmissing-prototypes -std=gnu90 \
 @WARNINGS_TRUE@	$(am__append_10)
 @WITH_KERNEL_MODULE_TRUE@drv_tapi_dxs_CFLAGS = -D__LINUX__ -DLINUX -D__KERNEL__ \
-@WITH_KERNEL_MODULE_TRUE@                      -DMODULE -DEXPORT_SYMTAB $(AM_CFLAGS) \
+@WITH_KERNEL_MODULE_TRUE@                      -DMODULE -DEXPORT_SYMTAB $(filter-out -std=gnu90,$(AM_CFLAGS)) \
 @WITH_KERNEL_MODULE_TRUE@                      -DTAPI_HAVE_TIMERS \
-@WITH_KERNEL_MODULE_TRUE@                      -fno-common -fno-strict-overflow -fno-delete-null-pointer-checks -fwrapv
+@WITH_KERNEL_MODULE_TRUE@                      -fno-common -fno-strict-overflow -fno-delete-null-pointer-checks -fwrapv \
+@WITH_KERNEL_MODULE_TRUE@                      -Wno-error
 
 @WITH_KERNEL_MODULE_TRUE@drv_tapi_dxs_ko_LDFLAGS = -r -nostdlib
 @WITH_KERNEL_MODULE_TRUE@drv_tapi_dxs_OBJS = "$(subst .c,.o, $(drv_tapi_dxs_SOURCES))"
@@ -2075,7 +2076,7 @@ install-exec-hook: $(bin_PROGRAMS)
 @WITH_KERNEL_MODULE_TRUE@	@echo -e "# drv_tapi_dxs: Generated to build Linux kernel object" > $(PWD)/Kbuild
 @WITH_KERNEL_MODULE_TRUE@	@echo -e "obj-m := $(subst .ko,.o,$@)" >> $(PWD)/Kbuild
 @WITH_KERNEL_MODULE_TRUE@	@echo -e "$(subst .ko,,$@)-y := $(drv_tapi_dxs_OBJS)" >> $(PWD)/Kbuild
-@WITH_KERNEL_MODULE_TRUE@	@echo -e "EXTRA_CFLAGS := -DHAVE_CONFIG_H  $(drv_tapi_dxs_CFLAGS) $(AM_CPPFLAGS)" >> $(PWD)/Kbuild
+@WITH_KERNEL_MODULE_TRUE@	@echo -e "ccflags-y := -DHAVE_CONFIG_H  $(drv_tapi_dxs_CFLAGS) $(AM_CPPFLAGS)" >> $(PWD)/Kbuild
 
 #	Kernel Makefile exports LDFLAGS, which might pull-in wrong settings
 @WITH_KERNEL_MODULE_TRUE@	LDFLAGS= \

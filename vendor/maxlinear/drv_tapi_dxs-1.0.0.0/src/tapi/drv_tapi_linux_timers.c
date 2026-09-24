@@ -740,8 +740,7 @@ Timer_ID TAPI_Create_Timer(TIMER_ENTRY pTimerEntry, IFX_ulong_t nArgument)
    pTimerData->pTimerEntry = pTimerEntry;
    pTimerData->nArgument = nArgument;
    pTimerData->bStopped = IFX_FALSE;
-   hrtimer_init(&pTimerData->Timer_HR, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-   pTimerData->Timer_HR.function = TAPI_timer_call_back;
+   hrtimer_setup(&pTimerData->Timer_HR, TAPI_timer_call_back, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
    /* Initialize Timer Task */
    INIT_WORK(&(pTimerData->timerTask), TAPI_tqueue);

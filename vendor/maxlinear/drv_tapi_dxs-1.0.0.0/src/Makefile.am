@@ -300,9 +300,10 @@ AM_CFLAGS += @USER_EXTRA_CFLAGS@
 endif
 
 drv_tapi_dxs_CFLAGS = -D__LINUX__ -DLINUX -D__KERNEL__ \
-                      -DMODULE -DEXPORT_SYMTAB $(AM_CFLAGS) \
+                      -DMODULE -DEXPORT_SYMTAB $(filter-out -std=gnu90,$(AM_CFLAGS)) \
                       -DTAPI_HAVE_TIMERS \
-                      -fno-common -fno-strict-overflow -fno-delete-null-pointer-checks -fwrapv
+                      -fno-common -fno-strict-overflow -fno-delete-null-pointer-checks -fwrapv \
+                      -Wno-error
 
 drv_tapi_dxs_ko_LDFLAGS = -r -nostdlib
 
@@ -356,7 +357,7 @@ drv_tapi_dxs.ko: $(drv_tapi_dxs_SOURCES) $(nodist_drv_tapi_dxs_ko_SOURCES) $(nod
 	@echo -e "# drv_tapi_dxs: Generated to build Linux kernel object" > $(PWD)/Kbuild
 	@echo -e "obj-m := $(subst .ko,.o,$@)" >> $(PWD)/Kbuild
 	@echo -e "$(subst .ko,,$@)-y := $(drv_tapi_dxs_OBJS)" >> $(PWD)/Kbuild
-	@echo -e "EXTRA_CFLAGS := -DHAVE_CONFIG_H  $(drv_tapi_dxs_CFLAGS) $(AM_CPPFLAGS)" >> $(PWD)/Kbuild
+	@echo -e "ccflags-y := -DHAVE_CONFIG_H  $(drv_tapi_dxs_CFLAGS) $(AM_CPPFLAGS)" >> $(PWD)/Kbuild
 
 #	Kernel Makefile exports LDFLAGS, which might pull-in wrong settings
 	LDFLAGS= \
