@@ -49,11 +49,9 @@ endef
 define KernelPackage/en75xx-slic-le9642
   SUBMENU:=Voice over IP
   TITLE:=Microsemi Le9641/Le9642 FXS (ZSI)
-  DEPENDS:=+kmod-en75xx-pcm
-  FILES:= \
-	$(PKG_BUILD_DIR)/en75xx-zsi.ko \
-	$(PKG_BUILD_DIR)/en75xx-slic-le9642.ko
-  AUTOLOAD:=$(call AutoLoad,51,en75xx-zsi en75xx-slic-le9642)
+  DEPENDS:=+kmod-en75xx-pcm +kmod-en75xx-slic-serial
+  FILES:=$(PKG_BUILD_DIR)/en75xx-slic-le9642.ko
+  AUTOLOAD:=$(call AutoLoad,52,en75xx-slic-le9642)
 endef
 
 define KernelPackage/en75xx-slic-le9642/description
@@ -64,11 +62,9 @@ endef
 define KernelPackage/en75xx-slic-si3219x
   SUBMENU:=Voice over IP
   TITLE:=Skyworks Si3218x/Si3219x ProSLIC FXS (SPI/ISI)
-  DEPENDS:=+kmod-en75xx-pcm
-  FILES:= \
-	$(PKG_BUILD_DIR)/en75xx-isi-spi.ko \
-	$(PKG_BUILD_DIR)/en75xx-slic-si3219x.ko
-  AUTOLOAD:=$(call AutoLoad,51,en75xx-isi-spi en75xx-slic-si3219x)
+  DEPENDS:=+kmod-en75xx-pcm +kmod-en75xx-slic-serial
+  FILES:=$(PKG_BUILD_DIR)/en75xx-slic-si3219x.ko
+  AUTOLOAD:=$(call AutoLoad,52,en75xx-slic-si3219x)
 endef
 
 define KernelPackage/en75xx-slic-si3219x/description
@@ -80,10 +76,26 @@ define KernelPackage/en75xx-slic-si3219x/description
  XC220-G3v boards.
 endef
 
+define KernelPackage/en75xx-slic-serial
+  SUBMENU:=Voice over IP
+  TITLE:=EcoNet/Airoha EN75xx ISI/CSI/ZSI SLIC transports
+  DEPENDS:=+kmod-en75xx-pcm
+  FILES:= \
+	$(PKG_BUILD_DIR)/en75xx-isi-spi.ko \
+	$(PKG_BUILD_DIR)/en75xx-zsi.ko
+  AUTOLOAD:=$(call AutoLoad,51,en75xx-isi-spi en75xx-zsi)
+endef
+
+define KernelPackage/en75xx-slic-serial/description
+ Shared serial transport for SLIC control protocols multiplexed over the
+ EN75xx PCM wrapper. It supports Skyworks ISI, MaxLinear/Lantiq CSI and
+ EN751221 ZSI-to-SPI; the framing is described by the controller compatible.
+endef
+
 define KernelPackage/en75xx-slic-dxs-cibb12
   SUBMENU:=Voice over IP
   TITLE:=MaxLinear PEF32001/PEF32002 TAPI (CIBB12)
-  DEPENDS:=+kmod-en75xx-pcm +en75xx-dxs-firmware
+  DEPENDS:=+kmod-en75xx-pcm +kmod-en75xx-slic-serial +en75xx-dxs-firmware
   FILES:=$(PKG_BUILD_DIR)/dxs-build/src/drv_tapi_dxs.ko
 endef
 
@@ -125,7 +137,7 @@ define Build/Configure
 			--enable-tapi3 \
 			--enable-kernel-api \
 			--enable-dcdc-hw=CIBB12 \
-			--with-max-devices=4))
+			--with-max-devices=2))
 endef
 
 define Build/Compile
@@ -137,6 +149,7 @@ $(eval $(call KernelPackage,en75xx-lec))
 $(eval $(call KernelPackage,en75xx-pcm))
 $(eval $(call KernelPackage,en75xx-slic-le9642))
 $(eval $(call KernelPackage,en75xx-slic-si3219x))
+$(eval $(call KernelPackage,en75xx-slic-serial))
 $(eval $(call KernelPackage,en75xx-slic-dxs-cibb12))
 $(eval $(call BuildPackage,en75xx-proslic-firmware))
 $(eval $(call BuildPackage,en75xx-dxs-firmware))

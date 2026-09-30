@@ -16,6 +16,10 @@ It is different from MaxLinear firmware 2.1.9 (25,200 bytes, SHA-256
 Do not replace it solely because the latter has a newer version number: the
 driver selects payloads according to the detected DXS silicon/ROM revision.
 
+The G-240G-E production rootfs independently checked during the port contains
+byte-identical copies of both this firmware and `DXS_BBD.bin`. Its boot script
+configures one PEF32002 device, two FXS channels and two PCM1 channels.
+
 The MaxLinear binary firmware and coefficient packages have their own license.
 Keep locally obtained releases outside the source tree unless their exact
 redistribution terms have been reviewed. The driver source under

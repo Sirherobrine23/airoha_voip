@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ISI (Skyworks-style Interchip Serial Interface) transport for EN75xx
- * SLICs, exposed as an ordinary Linux spi_controller.
+ * ISI/CSI serial transport for EN75xx SLICs, exposed as an ordinary Linux
+ * spi_controller.
  *
  * ISI multiplexes the ProSLIC control channel over the PCM bus the same
  * way ZSI does for the Microchip parts (see en75xx_zsi.c) -- the SLIC
@@ -93,6 +93,8 @@ MODULE_PARM_DESC(en7528_pcm_clk, "enable EN7528's chip-SCU PCM clock generator d
  * that bit and corrupt the engine config before every transaction.
  */
 #define ISI_REG_CFG			0x000
+#define  CSI_CFG_MASK			0x1f000010u
+#define  CSI_CFG_VALUE			0x0f000010u
 #define ISI_REG_TXDATA			0x004
 #define ISI_REG_STATUS			0x008
 #define  ISI_STATUS_READ_START		BIT(0)
@@ -113,6 +115,7 @@ MODULE_PARM_DESC(en7528_pcm_clk, "enable EN7528's chip-SCU PCM clock generator d
 #define SYS_IFACE_MODE			0x094
 #define  SYS_IFACE_MODE_MASK		GENMASK(3, 0)
 #define  SYS_IFACE_MODE_ISI		0xf
+#define  SYS_IFACE_MODE_CSI		0x5
 
 /*
  * Chip SCU (0x1fa20000): SLIC clock source and pin routing, indexed from
@@ -177,9 +180,11 @@ struct en75xx_isi_spi {
 	struct reset_control	*rst;
 	struct clk		*slic_clk;
 	spinlock_t		lock;
+	bool			csi;
 };
 
 struct en75xx_isi_quirks {
+	bool csi;
 	bool needs_audio_pll;
 	bool needs_en7528_clk;
 	/* chip_scu_clksrc_reg == 0 means "not known for this SoC yet" -- see
@@ -191,6 +196,31 @@ struct en75xx_isi_quirks {
 	u32 chip_scu_pinmux_mask;
 	u32 pinmux_extra_set;	/* EN7523-only; see file header, 0 elsewhere */
 };
+
+/*
+ * CSI_bytes_{read,write}() in the vendor spi.ko programs this exact CFG
+ * value once before sending the two-byte DXS header and its payload. A DXS
+ * read made with spi_write_then_read() is one message containing a TX
+ * transfer followed by an RX transfer, so prepare_message() is the right
+ * level: transfer_one() would repeat CFG between the header and returned
+ * data, something the vendor implementation never does.
+ */
+static int en75xx_serial_prepare_message(struct spi_controller *host,
+					 struct spi_message *message)
+{
+	struct en75xx_isi_spi *isi = spi_controller_get_devdata(host);
+	u32 cfg;
+
+	(void)message;
+
+	if (!isi->csi)
+		return 0;
+
+	cfg = readl(isi->base + ISI_REG_CFG);
+	cfg = (cfg & ~CSI_CFG_MASK) | CSI_CFG_VALUE;
+	writel(cfg, isi->base + ISI_REG_CFG);
+	return 0;
+}
 
 static int isi_start_apll(struct en75xx_isi_spi *isi)
 {
@@ -372,7 +402,8 @@ static int en75xx_isi_spi_hw_init(struct en75xx_isi_spi *isi,
 	 * never answers however correct the byte-level transfers are.
 	 */
 	ret = en75xx_scu_update(&isi->sys, SYS_IFACE_MODE, SYS_IFACE_MODE_MASK,
-				SYS_IFACE_MODE_ISI);
+				quirks->csi ? SYS_IFACE_MODE_CSI :
+					       SYS_IFACE_MODE_ISI);
 	if (ret)
 		return dev_err_probe(isi->dev, ret,
 				     "cannot set the SLIC interface mode\n");
@@ -395,7 +426,8 @@ static int en75xx_isi_spi_hw_init(struct en75xx_isi_spi *isi,
 	writel(readl(isi->base + ISI_REG_EN) | ISI_EN_BITS,
 	       isi->base + ISI_REG_EN);
 
-	dev_info(isi->dev, "ISI mode selected, wrapper enabled%s\n",
+	dev_info(isi->dev, "%s mode selected, wrapper enabled%s\n",
+		 quirks->csi ? "CSI" : "ISI",
 		 quirks->needs_audio_pll ? " (audio PLL programmed)" : "");
 	return 0;
 }
@@ -418,6 +450,7 @@ static int en75xx_isi_spi_probe(struct platform_device *pdev)
 
 	isi = spi_controller_get_devdata(host);
 	isi->dev = dev;
+	isi->csi = quirks->csi;
 	spin_lock_init(&isi->lock);
 
 	isi->base = devm_platform_ioremap_resource_byname(pdev, "isi");
@@ -464,13 +497,14 @@ static int en75xx_isi_spi_probe(struct platform_device *pdev)
 	host->bits_per_word_mask = SPI_BPW_MASK(8);
 	host->flags = SPI_CONTROLLER_HALF_DUPLEX;
 	host->use_gpio_descriptors = true;
+	host->prepare_message = en75xx_serial_prepare_message;
 	host->transfer_one = en75xx_isi_spi_transfer_one;
 
 	ret = devm_spi_register_controller(dev, host);
 	if (ret)
 		return dev_err_probe(dev, ret, "cannot register SPI controller\n");
 
-	dev_info(dev, "ISI SPI controller ready\n");
+	dev_info(dev, "%s SPI controller ready\n", isi->csi ? "CSI" : "ISI");
 	return 0;
 }
 
@@ -494,8 +528,21 @@ static const struct en75xx_isi_quirks en7528_isi_quirks = {
 	.chip_scu_pinmux_mask = EN7528_CHIP_SCU_PINMUX_MASK,
 };
 
+/* Askey RTF8225VW and MitraStar GPT-2742GX4X5v6 use CSI for PEF32001. */
+static const struct en75xx_isi_quirks en7523_csi_quirks = {
+	.csi = true,
+	.needs_audio_pll = true,
+	.chip_scu_clksrc_reg = EN7523_CHIP_SCU_CLKSRC,
+	.chip_scu_clksrc_mask = EN7523_CHIP_SCU_CLKSRC_MASK,
+	.chip_scu_gpio_dev1 = EN7523_CHIP_SCU_GPIO_DEV1,
+	.chip_scu_pinmux_reg = EN7523_CHIP_SCU_PINMUX,
+	.chip_scu_pinmux_mask = EN7523_CHIP_SCU_PINMUX_MASK,
+	.pinmux_extra_set = EN7523_CHIP_SCU_PINMUX_EXTRA,
+};
+
 static const struct of_device_id en75xx_isi_spi_of_match[] = {
 	{ .compatible = "airoha,en7523-isi-spi", .data = &en7523_isi_quirks },
+	{ .compatible = "airoha,en7523-csi-spi", .data = &en7523_csi_quirks },
 	{ .compatible = "econet,en7528-isi-spi", .data = &en7528_isi_quirks },
 	{ }
 };
@@ -510,5 +557,5 @@ static struct platform_driver en75xx_isi_spi_driver = {
 };
 module_platform_driver(en75xx_isi_spi_driver);
 
-MODULE_DESCRIPTION("EcoNet/Airoha EN75xx ISI SLIC transport (spi_controller)");
+MODULE_DESCRIPTION("EcoNet/Airoha EN75xx ISI/CSI SLIC transport (spi_controller)");
 MODULE_LICENSE("GPL");

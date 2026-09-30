@@ -34,6 +34,7 @@
 #include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
+#include <linux/spi/spi.h>
 
 #include "en75xx_scu.h"
 #include "en75xx_zsi.h"
@@ -94,6 +95,8 @@ struct en75xx_zsi {
 	struct list_head	node;
 	unsigned int		gap_us;
 	bool			hw_ready;
+	bool			spi_host;
+	struct spi_controller	*host;
 };
 
 static LIST_HEAD(en75xx_zsi_list);
@@ -369,6 +372,96 @@ out:
 EXPORT_SYMBOL_GPL(en75xx_zsi_write_reg);
 
 /* ------------------------------------------------------------------ */
+/* Raw ZSI exposed as an SPI controller                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * DUSLIC XS describes its control protocol as SPI (a two-byte header
+ * followed by 16/32-bit data), but EN751221 boards carry those bytes over
+ * the PCM-multiplexed ZSI wrapper.  The stock stack did the same conversion
+ * inside SPI_bytes_{read,write}().  Exposing a real spi_controller here lets
+ * the unmodified MaxLinear Linux driver use spi_sync() while retaining the
+ * SoC-specific ZSI transport below it.
+ *
+ * prepare/unprepare hold the mutex for the whole spi_message.  This matters
+ * for spi_write_then_read(): the header and returned bytes are one logical
+ * DXS transaction and no Zarlink client may interleave traffic between them.
+ */
+static int en75xx_zsi_spi_prepare_message(struct spi_controller *host,
+					   struct spi_message *message)
+{
+	struct en75xx_zsi *zsi = *(struct en75xx_zsi **)
+		spi_controller_get_devdata(host);
+
+	(void)message;
+	if (!zsi->hw_ready)
+		return -EIO;
+	mutex_lock(&zsi->lock);
+	return 0;
+}
+
+static int en75xx_zsi_spi_unprepare_message(struct spi_controller *host,
+					     struct spi_message *message)
+{
+	struct en75xx_zsi *zsi = *(struct en75xx_zsi **)
+		spi_controller_get_devdata(host);
+
+	(void)message;
+	mutex_unlock(&zsi->lock);
+	return 0;
+}
+
+static int en75xx_zsi_spi_transfer_one(struct spi_controller *host,
+				       struct spi_device *spi,
+				       struct spi_transfer *xfer)
+{
+	struct en75xx_zsi *zsi = *(struct en75xx_zsi **)
+		spi_controller_get_devdata(host);
+	const u8 *tx = xfer->tx_buf;
+	u8 *rx = xfer->rx_buf;
+	unsigned int i;
+	int ret;
+
+	(void)spi;
+	for (i = 0; i < xfer->len; i++) {
+		if (tx) {
+			ret = zsi_write_byte(zsi, tx[i]);
+			if (ret)
+				return ret;
+		}
+		if (rx) {
+			ret = zsi_read_byte(zsi, &rx[i]);
+			if (ret)
+				return ret;
+		}
+	}
+
+	return 0;
+}
+
+static int en75xx_zsi_register_spi_host(struct en75xx_zsi *zsi)
+{
+	struct spi_controller *host;
+	struct en75xx_zsi **priv;
+
+	host = devm_spi_alloc_host(zsi->dev, sizeof(*priv));
+	if (!host)
+		return -ENOMEM;
+
+	priv = spi_controller_get_devdata(host);
+	*priv = zsi;
+	host->dev.of_node = zsi->dev->of_node;
+	host->mode_bits = SPI_CPOL | SPI_CPHA;
+	host->num_chipselect = 8;
+	host->prepare_message = en75xx_zsi_spi_prepare_message;
+	host->unprepare_message = en75xx_zsi_spi_unprepare_message;
+	host->transfer_one = en75xx_zsi_spi_transfer_one;
+
+	zsi->host = host;
+	return devm_spi_register_controller(zsi->dev, host);
+}
+
+/* ------------------------------------------------------------------ */
 /* Lookup and platform driver                                          */
 /* ------------------------------------------------------------------ */
 
@@ -422,6 +515,8 @@ static int en75xx_zsi_probe(struct platform_device *pdev)
 	zsi->gap_us = zsi_gap_us;
 	zsi->legacy_scu = device_property_read_bool(dev,
 						   "airoha,legacy-scu-programming");
+	zsi->spi_host = of_device_is_compatible(dev->of_node,
+						"econet,en751221-zsi-spi");
 
 	zsi->base = devm_platform_ioremap_resource_byname(pdev, "zsi");
 	if (IS_ERR(zsi->base))
@@ -430,7 +525,8 @@ static int en75xx_zsi_probe(struct platform_device *pdev)
 		return PTR_ERR(zsi->base);
 
 	if (zsi->legacy_scu) {
-		if (!of_device_is_compatible(dev->of_node, "econet,en751221-zsi"))
+		if (!of_device_is_compatible(dev->of_node, "econet,en751221-zsi") &&
+		    !zsi->spi_host)
 			return dev_err_probe(dev, -EINVAL,
 				"legacy SCU programming is verified only on EN751221\n");
 
@@ -467,24 +563,33 @@ static int en75xx_zsi_probe(struct platform_device *pdev)
 	mutex_unlock(&en75xx_zsi_list_lock);
 
 	platform_set_drvdata(pdev, zsi);
+	if (zsi->spi_host) {
+		ret = en75xx_zsi_hw_init(zsi);
+		if (ret)
+			goto err_list;
+	}
 	dev_info(dev, "ZSI transport ready (gap %u us%s)\n", zsi->gap_us,
 		 zsi->legacy_scu ? ", legacy SCU" : "");
 
-	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
-	if (ret) {
-		mutex_lock(&en75xx_zsi_list_lock);
-		list_del_init(&zsi->node);
-		mutex_unlock(&en75xx_zsi_list_lock);
-		return dev_err_probe(dev, ret, "cannot populate ZSI children\n");
-	}
+	ret = zsi->spi_host ? en75xx_zsi_register_spi_host(zsi) :
+		of_platform_populate(dev->of_node, NULL, NULL, dev);
+	if (ret)
+		goto err_list;
 	return 0;
+
+err_list:
+	mutex_lock(&en75xx_zsi_list_lock);
+	list_del_init(&zsi->node);
+	mutex_unlock(&en75xx_zsi_list_lock);
+	return dev_err_probe(dev, ret, "cannot register ZSI client bus\n");
 }
 
 static void en75xx_zsi_remove(struct platform_device *pdev)
 {
 	struct en75xx_zsi *zsi = platform_get_drvdata(pdev);
 
-	of_platform_depopulate(&pdev->dev);
+	if (!zsi->spi_host)
+		of_platform_depopulate(&pdev->dev);
 	mutex_lock(&en75xx_zsi_list_lock);
 	list_del_init(&zsi->node);
 	mutex_unlock(&en75xx_zsi_list_lock);
@@ -492,6 +597,7 @@ static void en75xx_zsi_remove(struct platform_device *pdev)
 
 static const struct of_device_id en75xx_zsi_of_match[] = {
 	{ .compatible = "econet,en751221-zsi" },
+	{ .compatible = "econet,en751221-zsi-spi" },
 	{ .compatible = "econet,en7528-zsi" },
 	{ .compatible = "airoha,en7523-zsi" },
 	{ .compatible = "econet,en75xx-zsi" },
