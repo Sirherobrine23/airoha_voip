@@ -18,3 +18,8 @@ __pycache__/
 # Device tree build output
 *.dtb
 *.dtbo
+
+# Generated DXS configuration and locally extracted board firmware
+/vendor/maxlinear/drv_tapi_dxs-1.0.0.0/include/drv_tapi_if_version.h
+/build/
+/firmware/dxs/DXS_FW_mitrastar.bin

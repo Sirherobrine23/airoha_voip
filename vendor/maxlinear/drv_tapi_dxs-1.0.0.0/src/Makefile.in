@@ -481,7 +481,7 @@ drv_tapi_dxs_SOURCES = dxs/drv_dxs_alm_aclm.c dxs/drv_dxs_access.c \
 
 
 # EXTRA_DIST from TAPI driver
-EXTRA_DIST = ../include/drv_dxs_errno.h ../include/drv_dxs_strerrno.h \
+EXTRA_DIST = dxs/en75xx_dxs_kernel.h ../include/drv_dxs_errno.h ../include/drv_dxs_strerrno.h \
 	../include/drv_dxs_io.h ../include/drv_dxs_io_types.h \
 	../include/drv_dxs_dev_io.h dxs/drv_dxs_version.h \
 	dxs/drv_dxs_alm_aclm.h dxs/drv_dxs_irq.h dxs/drv_dxs_access.h \

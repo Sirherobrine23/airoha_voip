@@ -52,3 +52,11 @@ ccflags-y += -DSI3219X -DPROSLIC_LINUX_KERNEL
 CFLAGS_proslic.o                  += -Wno-unused-but-set-variable
 CFLAGS_proslic.o                  += -Wno-missing-prototypes
 CFLAGS_si3219x_intf.o             += -Wno-unused-but-set-variable
+
+# TAPI is built first; the adapter consumes its generated headers and exports.
+ifneq ($(EN75XX_DXS_BUILD),)
+obj-m += en75xx-slic-dxs.o
+en75xx-slic-dxs-objs := en75xx_slic_dxs.o
+DXS_VENDOR := $(src)/../vendor/maxlinear/drv_tapi_dxs-1.0.0.0
+CFLAGS_en75xx_slic_dxs.o += -I$(EN75XX_DXS_BUILD)/include -I$(DXS_VENDOR)/include
+endif

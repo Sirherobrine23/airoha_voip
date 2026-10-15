@@ -1034,7 +1034,8 @@ IFX_int32_t DXS_BBD_Download_32 (DXS_CHANNEL_t *pCh, DXS_BBD_Download_32_t *pBBD
    - DXS_statusBbdBlockErr
 */
 static IFX_int32_t dxs_bbd_download(DXS_CHANNEL_t *pCh,
-                                    const DXS_BBD_Download_t *pBBD)
+                                    const DXS_BBD_Download_t *pBBD,
+                                    IFX_boolean_t kernel_buffer)
 {
    IFX_int32_t       ret = DXS_statusOk;
    DXS_DEVICE_t      *pDev = IFX_NULL;
@@ -1108,7 +1109,9 @@ static IFX_int32_t dxs_bbd_download(DXS_CHANNEL_t *pCh,
          RETURN_DEVSTATUS(DXS_statusNoMem, IFX_NULL);
       }
 
-      if (TAPI_OS_CpyUsr2Kern(bbd.buf, pBBD->buf, pBBD->size) == IFX_NULL)
+      if (kernel_buffer)
+         memcpy(bbd.buf, pBBD->buf, pBBD->size);
+      else if (TAPI_OS_CpyUsr2Kern(bbd.buf, pBBD->buf, pBBD->size) == IFX_NULL)
       {
          TAPI_OS_Free(bbd.buf);
          /* errmsg: No memory could be allocated. */
@@ -1459,7 +1462,7 @@ IFX_int32_t DXS_BBD_Download(DXS_CHANNEL_t *pCh, DXS_BBD_Download_t *pBBD)
    /* Explicit check to satisfy Klocwork scan. */
    if (pBBD->buf <= (IFX_uint8_t *) SIZE_MAX)
    {
-      return dxs_bbd_download(pCh, pBBD);
+      return dxs_bbd_download(pCh, pBBD, IFX_FALSE);
    }
 
    RETURN_STATUS(DXS_statusBbdErr, IFX_NULL);
@@ -1468,3 +1471,26 @@ IFX_int32_t DXS_BBD_Download(DXS_CHANNEL_t *pCh, DXS_BBD_Download_t *pBBD)
 /* ========================================================================== */
 /*                         Function pointer exports                           */
 /* ========================================================================== */
+
+#ifdef __KERNEL__
+#include "en75xx_dxs_kernel.h"
+
+int en75xx_dxs_kernel_bbd(unsigned int index, const u8 *data, size_t size)
+{
+   DXS_DEVICE_t *pDev;
+   DXS_BBD_Download_t bbd = {0};
+   int ret;
+
+   /* Raw, per-topology BBD only. The normal parser still checks integrity
+    * and the compiled DC/DC topology before issuing any commands. */
+   if (!data || size < 16 || size > DXS_MAX_BBD_FIRMWARE_SIZE ||
+       DXS_GetDevice(index, &pDev) != DXS_statusOk ||
+       !(pDev->nDevState & DS_DEV_INIT))
+      return -EINVAL;
+   bbd.buf = (IFX_uint8_t *)data;
+   bbd.size = size;
+   ret = dxs_bbd_download((DXS_CHANNEL_t *)(void *)pDev, &bbd, IFX_TRUE);
+   return ret == DXS_statusOk ? 0 : -EIO;
+}
+EXPORT_SYMBOL_GPL(en75xx_dxs_kernel_bbd);
+#endif

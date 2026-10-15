@@ -462,6 +462,10 @@ IFX_int32_t DXS_ChipAccessInit(DXS_DEVICE_t *pDev,
       IFX_TAPI_DeviceReset (pDev->pTapiDev);
    }
 
+   /* A failed previous access test can still own the access mutexes. */
+   if (pDev->bAccessMutexesInitialized)
+      dxs_ChipAccessExit(pDev);
+
    /* initialize firmware download protection semaphore */
    TAPI_OS_MutexInit (&pDev->mtxFwDlAcc);
 
@@ -472,6 +476,7 @@ IFX_int32_t DXS_ChipAccessInit(DXS_DEVICE_t *pDev,
 
    /* Initialise SPI access to the device. */
    dxs_init_spi (pDev);
+   pDev->bAccessMutexesInitialized = IFX_TRUE;
 
    tapi_debug_buffer_add_user_entry("dxs #%d reg access test", pDev->nDevNr);
 
@@ -611,6 +616,9 @@ static IFX_void_t dxs_ChipAccessExit(DXS_DEVICE_t *pDev)
       return;
    }
 
+   if (!pDev->bAccessMutexesInitialized)
+      return;
+
    if (pDev->nDevState & DS_BASIC_INIT)
    {
       /* Device state: basic init is not done */
@@ -640,6 +648,7 @@ static IFX_void_t dxs_ChipAccessExit(DXS_DEVICE_t *pDev)
    dxs_exit_spi (pDev);
    TAPI_OS_MutexDelete (&pDev->mtxSpiAcc);
    TAPI_OS_MutexDelete (&pDev->mtxFwDlAcc);
+   pDev->bAccessMutexesInitialized = IFX_FALSE;
 }
 
 
@@ -1006,7 +1015,8 @@ static IFX_int32_t DXS_TAPI_LL_FW_Start(IFX_TAPI_LL_DEV_t *pLLDev,
    - DXS_statusBbdErr         download of BBD buffer failed.
    - DXS_statusNoBbdBuf       no valid BBD buffer received
 */
-IFX_int32_t DXS_FW_Start(DXS_DEVICE_t *pDev, const DXS_IO_Init_t *pInit)
+static IFX_int32_t dxs_fw_start(DXS_DEVICE_t *pDev, const DXS_IO_Init_t *pInit,
+                               IFX_boolean_t kernel_buffer)
 {
    IFX_int32_t ret = DXS_statusErr;
    DXS_FW_Download_t edspDwld = {0};
@@ -1027,13 +1037,22 @@ IFX_int32_t DXS_FW_Start(DXS_DEVICE_t *pDev, const DXS_IO_Init_t *pInit)
       RETURN_DEVSTATUS(DXS_statusParam, IFX_NULL);
 
    /* set download pointers */
-   dxs_DwldPtrSet(pInit, &edspDwld);
+   if (kernel_buffer)
+   {
+      /* The kernel client owns this buffer for the duration of the call. */
+      edspDwld.pPRAMfw = pInit->pPRAMfw;
+      edspDwld.pram_size = pInit->pram_size;
+      edspDwld.nEdspFlags = pInit->nFlags;
+   }
+   else
+      dxs_DwldPtrSet(pInit, &edspDwld);
 
    /* download firmware */
    ret = DXS_DwldFirmwareSelect(pDev, &edspDwld);
 
    /* now that downloads are finished, release memory */
-   dxs_DwldPtrUnset(&edspDwld);
+   if (!kernel_buffer)
+      dxs_DwldPtrUnset(&edspDwld);
 
    if (ret != DXS_statusOk)
    {
@@ -1137,6 +1156,65 @@ IFX_int32_t DXS_FW_Start(DXS_DEVICE_t *pDev, const DXS_IO_Init_t *pInit)
 
    RETURN_DEVSTATUS(ret, IFX_NULL);
 }
+
+
+IFX_int32_t DXS_FW_Start(DXS_DEVICE_t *pDev, const DXS_IO_Init_t *pInit)
+{
+   return dxs_fw_start(pDev, pInit, IFX_FALSE);
+}
+
+#ifdef __KERNEL__
+/* Dedicated kernel entry points: never route kernel buffers through uaccess. */
+#include <linux/of.h>
+#include "en75xx_dxs_kernel.h"
+
+int en75xx_dxs_index(struct device_node *np)
+{
+   unsigned int i;
+   DXS_DEVICE_t *pDev;
+
+   for (i = 0; i < DXS_MAX_DEVICES; i++)
+      if (DXS_GetDevice(i, &pDev) == DXS_statusOk && pDev->pSpiDev &&
+          pDev->pSpiDev->dev.of_node == np)
+         return i;
+   return -EPROBE_DEFER;
+}
+EXPORT_SYMBOL_GPL(en75xx_dxs_index);
+
+int en75xx_dxs_basic_init(unsigned int index)
+{
+   DXS_DEVICE_t *pDev;
+   DXS_BasicDeviceInit_t basic = {0};
+   int ret;
+
+   if (DXS_GetDevice(index, &pDev) != DXS_statusOk || !pDev->pSpiDev)
+      return -ENODEV;
+   DXS_GPIO_Reset(pDev, 1);
+   DXS_GPIO_Reset(pDev, 0);
+   basic.dev = index;
+   basic.nIrqNum = -1; /* Explicit polling; no invented external IRQ. */
+   ret = DXS_ChipAccessInit(pDev, &basic);
+   return ret == DXS_statusOk ? 0 : -EIO;
+}
+EXPORT_SYMBOL_GPL(en75xx_dxs_basic_init);
+
+int en75xx_dxs_kernel_firmware(unsigned int index, const u8 *data, size_t size)
+{
+   DXS_DEVICE_t *pDev;
+   DXS_IO_Init_t init = {0};
+   int ret;
+
+   if (!data || !size || size > DXS_MAX_FIRMWARE_SIZE ||
+       DXS_GetDevice(index, &pDev) != DXS_statusOk ||
+       !(pDev->nDevState & DS_BASIC_INIT))
+      return -EINVAL;
+   init.pPRAMfw = (IFX_uint8_t *)data;
+   init.pram_size = size;
+   ret = dxs_fw_start(pDev, &init, IFX_TRUE);
+   return ret == DXS_statusOk ? 0 : -EIO;
+}
+EXPORT_SYMBOL_GPL(en75xx_dxs_kernel_firmware);
+#endif
 
 
 #ifdef TAPI_FEAT_LX_COMPAT

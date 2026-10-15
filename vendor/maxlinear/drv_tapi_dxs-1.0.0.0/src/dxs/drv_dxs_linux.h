@@ -39,4 +39,9 @@
 IFX_int32_t DXS_WaitForCmdMbxData(DXS_DEVICE_t *pDev);
 IFX_int32_t DXS_WaitForSddOpmodeChEvt(DXS_CHANNEL_t *pCh);
 
-#endif /* _DRV_DXS_IRQ_H */
+#ifdef __KERNEL__
+int DXS_SPI_ModuleInit(void);
+void DXS_SPI_ModuleExit(void);
+#endif
+
+#endif /* _DRV_DXS_LINUX_H */

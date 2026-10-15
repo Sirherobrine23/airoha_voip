@@ -355,6 +355,7 @@ struct _DXS_DEVICE_t
 
    /* DUSLIC XS SPI access protection mutex. */
    TAPI_OS_mutex_t             mtxSpiAcc;
+   IFX_boolean_t              bAccessMutexesInitialized;
 
    /* DUSLIC XS firmware download protection mutex. */
    TAPI_OS_mutex_t             mtxFwDlAcc;

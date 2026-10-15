@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Include after the board's EN751221 SoC definition. Starts in identify mode.
+ * GPIO reset routing/polarity and PCM edge timing still need board validation.
+ */
+#include "en751221-voice.dtsi"
+
+&pcm0 {
+	status = "okay";
+	airoha,dma-channel-mask = <0x03>;
+};
+
+/* CSI exclusively owns this wrapper. */
+/delete-node/ &zsi0;
+
+/ {
+	csi0: spi@1fbd1000 {
+		compatible = "econet,en751221-csi-spi";
+		reg = <0x1fbd1000 0x1000>;
+		reg-names = "isi";
+		airoha,scu = <&scuclk>;
+		airoha,chip-scu = <&chip_scu>;
+		resets = <&scuclk EN751221_PCM1_ZSI_ISI_RST>;
+		reset-names = "isi";
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcm_spi_pins>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+
+		dxs0: slic@0 {
+			compatible = "maxlinear,pef32002";
+			reg = <0>;
+			spi-max-frequency = <2000000>;
+			spi-cpol;
+			spi-cpha;
+			/* Add reset-gpios only with verified Linux GPIO/polarity. */
+			reset-interval-ms = <10>;
+		};
+	};
+
+	dxs_fxs: dxs-fxs {
+		compatible = "airoha,en75xx-dxs-fxs";
+		maxlinear,slic = <&dxs0>;
+		airoha,pcm = <&pcm0>;
+		airoha,pcm-channels = <0 1>;
+		airoha,bringup-mode = "identify";
+		firmware-name = "airoha-voice/DXS_FW.bin";
+		maxlinear,bbd-firmware = "airoha-voice/DXS_BBD.bin";
+		maxlinear,dcdc-topology = "CIBB12";
+	};
+};

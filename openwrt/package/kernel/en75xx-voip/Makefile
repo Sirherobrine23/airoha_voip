@@ -4,7 +4,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=en75xx-voip
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=Sirherobrine23
 
@@ -89,14 +89,16 @@ endef
 define KernelPackage/en75xx-slic-serial/description
  Shared serial transport for SLIC control protocols multiplexed over the
  EN75xx PCM wrapper. It supports Skyworks ISI, MaxLinear/Lantiq CSI and
- EN751221 ZSI-to-SPI; the framing is described by the controller compatible.
+ EN751221/EN7523 CSI; the framing is described by the controller compatible.
 endef
 
 define KernelPackage/en75xx-slic-dxs-cibb12
   SUBMENU:=Voice over IP
   TITLE:=MaxLinear PEF32001/PEF32002 TAPI (CIBB12)
   DEPENDS:=+kmod-en75xx-pcm +kmod-en75xx-slic-serial +en75xx-dxs-firmware
-  FILES:=$(PKG_BUILD_DIR)/dxs-build/src/drv_tapi_dxs.ko
+  FILES:= \
+	$(PKG_BUILD_DIR)/dxs-build/src/drv_tapi_dxs.ko \
+	$(PKG_BUILD_DIR)/en75xx-slic-dxs.ko
 endef
 
 define KernelPackage/en75xx-slic-dxs-cibb12/description
@@ -141,8 +143,10 @@ define Build/Configure
 endef
 
 define Build/Compile
-	+$(KERNEL_MAKE) M=$(PKG_BUILD_DIR) modules
-	$(if $(DXS_SELECTED),$(MAKE) $(PKG_JOBS) -C $(DXS_BUILD_DIR))
+	$(if $(DXS_SELECTED),$(MAKE) $(PKG_JOBS) -C $(DXS_BUILD_DIR) ACLOCAL=true AUTOCONF=true AUTOHEADER=true AUTOMAKE=true)
+	+$(KERNEL_MAKE) M=$(PKG_BUILD_DIR) \
+		$(if $(DXS_SELECTED),EN75XX_DXS_BUILD=$(DXS_BUILD_DIR) \
+		KBUILD_EXTRA_SYMBOLS=$(DXS_BUILD_DIR)/src/Module.symvers) modules
 endef
 
 $(eval $(call KernelPackage,en75xx-lec))

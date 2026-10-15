@@ -187,6 +187,7 @@ struct en75xx_isi_quirks {
 	bool csi;
 	bool needs_audio_pll;
 	bool needs_en7528_clk;
+	bool needs_en751221_clk;
 	/* chip_scu_clksrc_reg == 0 means "not known for this SoC yet" -- see
 	 * en75xx_isi_spi_hw_init(), which warns and skips rather than guess. */
 	u32 chip_scu_clksrc_reg;
@@ -359,6 +360,16 @@ static int en75xx_isi_spi_hw_init(struct en75xx_isi_spi *isi,
 			return ret;
 	}
 
+	if (quirks->needs_en751221_clk) {
+		/* Nokia pcm1.ko: clock output gate + selector. Preserve divider
+		 * and all unrelated shared SCU fields. Pinctrl owns the mux. */
+		ret = en75xx_scu_update(&isi->scu, 0x148, 0x0c, 0x0c);
+		if (!ret)
+			ret = en75xx_scu_update(&isi->scu, 0x0d8, 1, 1);
+		if (ret)
+			return dev_err_probe(isi->dev, ret, "cannot start EN751221 PCM clock\n");
+	}
+
 	if (quirks->needs_en7528_clk && en7528_pcm_clk) {
 		ret = en75xx_scu_write(&isi->scu, EN7528_CHIP_SCU_CLK_SRC,
 				       EN7528_CHIP_SCU_CLK_SRC_VAL);
@@ -389,7 +400,7 @@ static int en75xx_isi_spi_hw_init(struct en75xx_isi_spi *isi,
 		if (ret)
 			return dev_err_probe(isi->dev, ret,
 					     "cannot route the SLIC clock source\n");
-	} else {
+	} else if (!quirks->needs_en751221_clk) {
 		dev_warn(isi->dev,
 			"chip-SCU clock/pin routing not implemented for this SoC "
 			"(chipScuReg layout not decoded); relying on whatever the "
@@ -540,7 +551,14 @@ static const struct en75xx_isi_quirks en7523_csi_quirks = {
 	.pinmux_extra_set = EN7523_CHIP_SCU_PINMUX_EXTRA,
 };
 
+/* Nokia G-240G-E drv_dxs forces slicInterfType=3, i.e. CSI. */
+static const struct en75xx_isi_quirks en751221_csi_quirks = {
+	.csi = true,
+	.needs_en751221_clk = true,
+};
+
 static const struct of_device_id en75xx_isi_spi_of_match[] = {
+	{ .compatible = "econet,en751221-csi-spi", .data = &en751221_csi_quirks },
 	{ .compatible = "airoha,en7523-isi-spi", .data = &en7523_isi_quirks },
 	{ .compatible = "airoha,en7523-csi-spi", .data = &en7523_csi_quirks },
 	{ .compatible = "econet,en7528-isi-spi", .data = &en7528_isi_quirks },

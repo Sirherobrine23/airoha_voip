@@ -23,6 +23,9 @@
 #include "drv_dxs_access.h"
 
 #include "../tapi/drv_tapi_debug_buffer.h"
+#ifdef __KERNEL__
+#include <linux/of.h>
+#endif
 
 /* ========================================================================== */
 /*                             Macro definitions                              */
@@ -444,6 +447,24 @@ IFX_void_t dxs_exit_spi (DXS_DEVICE_t *pDev)
 }
 
 
+/* OEM CSI differs from a conventional SPI bus at the DXS access layer.
+ * Nokia drv_dxs-1.0.0.4 and MitraStar drv_dxs-1.3.1.0 both use a 10-byte
+ * response, discard byte zero, and duplicate standalone register writes.
+ * Keep these quirks local to controllers explicitly declaring CSI. */
+static IFX_boolean_t dxs_is_csi(DXS_DEVICE_t *pDev)
+{
+#ifdef __KERNEL__
+   struct device_node *np;
+   if (!pDev->pSpiDev)
+      return IFX_FALSE;
+   np = pDev->pSpiDev->controller->dev.of_node;
+   return of_device_is_compatible(np, "airoha,en7523-csi-spi") ||
+          of_device_is_compatible(np, "econet,en751221-csi-spi");
+#else
+   return IFX_FALSE;
+#endif
+}
+
 /**
    Write a number of bytes to a given DXS register using SPI.
 
@@ -469,7 +490,12 @@ IFX_int32_t dxs_spi_write(DXS_DEVICE_t *pDev,
                  written,
                  fragment_length;
    IFX_int32_t   ret = DXS_statusOk;
+   IFX_boolean_t csi = dxs_is_csi(pDev);
 
+#ifdef __KERNEL__
+   if (!pDev->pSpiDev)
+      return DXS_statusSpiAccErr;
+#endif
    /* (len == 0) not allowed : assertion */
    TAPI_ASSERT(len != 0);
    /* offset must be even, as we do 16bit access : assertion */
@@ -490,7 +516,7 @@ IFX_int32_t dxs_spi_write(DXS_DEVICE_t *pDev,
    tx_buf[1] = offset;
 #ifndef DXS_SPI_8BIT_ACCESS
    /* Set auto increment if register isn't a mailbox register. */
-   if ((len > 2) && (offset != DXS_HOST_DATA))
+   if (!csi && (len > 2) && (offset != DXS_HOST_DATA))
    {
       tx_buf[1] |= DXS_SPI_HDR_B1_I;
    }
@@ -513,6 +539,8 @@ IFX_int32_t dxs_spi_write(DXS_DEVICE_t *pDev,
          /* Limit the transfer to the maximum the SPI can transmit. */
          fragment_length = (SPI_MAXBYTES_SIZE - tx_buf_length);
       }
+      if (csi && fragment_length > 4)
+         fragment_length = 4;
       if ((offset == DXS_HOST_DATA) && (fragment_length > 4))
       {
          /* For mailboxes ensure that the fragment has a multiple of 4 bytes. */
@@ -533,6 +561,12 @@ IFX_int32_t dxs_spi_write(DXS_DEVICE_t *pDev,
       /* Increment by the number of payload bytes written. */
       tx_buf_length += fragment_length;
       written += fragment_length;
+      if (csi && offset != DXS_HOST_DATA && fragment_length == 2)
+      {
+         tx_buf[tx_buf_length] = tx_buf[DXS_SPI_HDR_LENGTH];
+         tx_buf[tx_buf_length + 1] = tx_buf[DXS_SPI_HDR_LENGTH + 1];
+         tx_buf_length += 2;
+      }
 
       /* Activate DXS by setting chip select line. (low means active) */
       SPI_CS_SET (pDev->nDevNr, IFX_LOW);
@@ -584,7 +618,12 @@ IFX_int32_t dxs_spi_read(DXS_DEVICE_t *pDev,
                  fragment_length,
                  rx_data_offset = 0;
    IFX_int32_t   ret = DXS_statusOk;
+   IFX_boolean_t csi = dxs_is_csi(pDev);
 
+#ifdef __KERNEL__
+   if (!pDev->pSpiDev)
+      return DXS_statusSpiAccErr;
+#endif
    /* (len == 0) not allowed : assertion */
    TAPI_ASSERT(len != 0);
    /* offset must be even, as we do 16bit access : assertion */
@@ -606,7 +645,7 @@ IFX_int32_t dxs_spi_read(DXS_DEVICE_t *pDev,
    tx_buf[1] = offset;
 #ifndef DXS_SPI_8BIT_ACCESS
    /* Set auto increment if register isn't a mailbox register. */
-   if ((len > 2) && (offset != DXS_HOST_DATA))
+   if (!csi && (len > 2) && (offset != DXS_HOST_DATA))
    {
       tx_buf[1] |= DXS_SPI_HDR_B1_I;
    }
@@ -630,6 +669,8 @@ IFX_int32_t dxs_spi_read(DXS_DEVICE_t *pDev,
          /* Limit the transfer to the maximum the SPI can transmit. */
          fragment_length = (SPI_MAXBYTES_SIZE - tx_buf_length);
       }
+      if (csi && fragment_length > 4)
+         fragment_length = 4;
       if ((offset == DXS_HOST_DATA) && (fragment_length > 4))
       {
          /* For mailboxes ensure that the fragment has a multiple of 4 bytes. */
@@ -641,7 +682,7 @@ IFX_int32_t dxs_spi_read(DXS_DEVICE_t *pDev,
 
       /* Access SPI for writing and reading. */
       ret = spi_ll_read_write (pDev, tx_buf, tx_buf_length,
-                                     rx_buf, fragment_length);
+                                     rx_buf, csi ? 10 : fragment_length);
 
       /* Deactivate DXS by setting chip select line. (high means inactive) */
       SPI_CS_SET(pDev->nDevNr, IFX_HIGH);
@@ -652,6 +693,9 @@ IFX_int32_t dxs_spi_read(DXS_DEVICE_t *pDev,
          /* Received data is at offset where the write ends. */
          rx_data_offset = DXS_SPI_HDR_LENGTH;
 #endif
+
+         if (csi)
+            rx_data_offset = 1;
 
          /* Copy the byte buffer into the read buffer respecting
             the endianess. */

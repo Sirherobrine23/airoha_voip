@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Include after the board's EN7523 SoC definition. Starts in identify mode.
+ * This describes ONE PEF32001. Stock discovery can find a second device;
+ * do not add it until the actual board population is checked.
+ */
+#include "en7523-voice.dtsi"
+
+&pcm0 {
+	status = "okay";
+	pinctrl-0 = <&pcm_spi_pins>;
+	airoha,dma-channel-mask = <0x01>;
+	/* OEM IntelSlicInit: DXS RX byte slot 3, DXS TX byte slot 4.
+	 * SoC TX/RX bit offsets are consequently 24/32. */
+	airoha,tx-slot-config = <0x10301018 0x10501040 0x10701060 0x10901080>;
+	airoha,rx-slot-config = <0x10301020 0x10501040 0x10701060 0x10901080>;
+};
+
+/* CSI exclusively owns this wrapper. */
+/delete-node/ &zsi0;
+
+&isi0 {
+	compatible = "airoha,en7523-csi-spi";
+	status = "okay";
+
+	dxs0: slic@0 {
+		compatible = "maxlinear,pef32001";
+		reg = <0>;
+		spi-max-frequency = <2000000>;
+		spi-cpol;
+		spi-cpha;
+		/* Add reset-gpios only with verified Linux GPIO/polarity. */
+		reset-interval-ms = <10>;
+	};
+};
+
+/ {
+	dxs_fxs: dxs-fxs {
+		compatible = "airoha,en75xx-dxs-fxs";
+		maxlinear,slic = <&dxs0>;
+		airoha,pcm = <&pcm0>;
+		airoha,pcm-channels = <0>;
+		airoha,bringup-mode = "identify";
+		firmware-name = "airoha-voice/DXS_FW_mitrastar.bin";
+		maxlinear,bbd-firmware = "airoha-voice/DXS_BBD.bin";
+		maxlinear,dcdc-topology = "CIBB12";
+	};
+};

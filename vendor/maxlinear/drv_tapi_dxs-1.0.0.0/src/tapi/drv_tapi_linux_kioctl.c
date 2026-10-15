@@ -59,8 +59,8 @@ IFX_TAPI_KIO_HANDLE ifx_tapi_kopen(char *name)
    IFX_char_t *dev_name = IFX_NULL;
    IFX_char_t *expected_dev_names[] = {"dxs"};
    IFX_uint_t i = 0;
-   IFX_uint8_t ucMajor = 0;
-   IFX_uint8_t ucMinor = 0;
+   unsigned int ucMajor = 0;
+   unsigned int ucMinor = 0;
 
    if (name == IFX_NULL)
    {

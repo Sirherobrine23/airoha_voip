@@ -88,6 +88,9 @@ int en75xx_pcm_channel_for_slot(struct en75xx_pcm *pcm, unsigned int bus_slot);
  * is the number a SLIC's own PCM timeslot registers want.
  */
 int en75xx_pcm_channel_bit_offset(struct en75xx_pcm *pcm, unsigned int channel);
+/* Validate an enabled DMA channel and return SoC TX/RX bit offsets. */
+int en75xx_pcm_channel_offsets(struct en75xx_pcm *pcm, unsigned int channel,
+			       int *txbit, int *rxbit);
 void en75xx_pcm_put(struct en75xx_pcm *pcm);
 void en75xx_pcm_iface_kick(struct en75xx_pcm *pcm);
 int en75xx_pcm_register(struct en75xx_pcm *pcm);

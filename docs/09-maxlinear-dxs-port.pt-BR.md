@@ -1,156 +1,180 @@
-# Port do MaxLinear PEF32001/PEF32002 (DXS101/DXS102)
+# MaxLinear PEF32001/PEF32002: port DXS/TAPI
 
-## Material confirmado
+## Estado deste port
 
-O pacote DXS TAPI SP 2.0 contém o `drv_tapi_dxs-1.0.0.0`, firmware 2.1.9,
-coeficientes 0.0.9 e a biblioteca de testes de linha. O fonte do driver é
-dual-license GPL-2.0/BSD-2-Clause e foi preservado em
-`vendor/maxlinear/drv_tapi_dxs-1.0.0.0`.
+Base: `main` a9a6ede do `airoha_voip`. Foram implementados o transporte CSI,
+a adaptação do backend MaxLinear e a ponte `en75xx-slic-dxs` para a ABI
+`/dev/en75xx-fxsN`. Ainda não houve teste deste port em hardware DXS.
+A inicialização dos exemplos DTS é **identify**, que testa acesso a registradores
+e reinicia o controlador DXS, sem carregar firmware/BBD nem ativar linefeed.
+Isso altera clocks, mux e registradores; não é uma operação somente de leitura.
 
-O DXS usa SPI mode 3 no protocolo lógico. Nas placas EN7523 Askey RTF8225VW
-e MitraStar GPT-2742GX4X5v6, porém, esse protocolo passa pelo wrapper CSI
-compartilhado com o PCM, e não por um controlador SPI independente. O firmware
-OEM detecta explicitamente `Lantiq CSI` e carrega
-`slic3_intel.ko type=CSI slic=pef32001 mode=IB`.
+| Placa escolhida | SoC | SLIC | Canais previstos | DTS |
+|---|---|---|---|---|
+| Nokia G-240G-E | EN751221 | um PEF32002 | 2 | `dts/nokia-g-240g-e-dxs.dtsi` |
+| MitraStar GPT-2742GX4X5v6 | EN7523 | PEF32001 | 1 no exemplo | `dts/mitrastar-gpt2742gx4x5v6-dxs.dtsi` |
 
-O rootfs stock da Nokia G-240G-E mostra uma integração diferente no
-EN751221: `slic3_sep.ko type=ZSI fxsNum=2 devNum=1 pcm1ChNum=2`, seguido por
-`drv_ifxos.ko`, `drv_tapi.ko` e `drv_dxs.ko major=93`. O `drv_dxs.ko` importa
-`SPI_cfg`, `SPI_Reset` e `SPI_bytes_{read,write}`; portanto, "SPI" é a API
-lógica do DXS, enquanto o `spi.ko` stock transporta os bytes por ZSI. O
-compatible `econet,en751221-zsi-spi` reproduz essa ponte pelo subsistema SPI
-moderno, sem tratar incorretamente a placa como CSI.
+O loader MitraStar admite descoberta de outro SLIC; a população real da placa
+precisa ser conferida antes de adicionar um segundo dispositivo. Askey RTF8225VW
+e Nokia XS-2426G-A não foram habilitados por este patch.
 
-A referência atual permite até 8 MHz; a documentação
-antiga do Voice System Package 4.44 limitava a integração a 2 MHz. O primeiro
-bring-up deve usar 2 MHz e só aumentar a frequência depois de validar leitura
-de registradores, firmware e mailbox sem erros.
+## Correção: Nokia também usa CSI
 
-O protocolo de registradores usa cabeçalho de dois bytes. Escrita usa
-`0x7e, offset`; leitura usa `0xbe, offset`. O bit 0 do segundo byte habilita
-auto-incremento para transferências com mais de uma palavra, exceto no
-registrador de mailbox `DXS_HOST_DATA`. Registradores comuns são palavras de
-16 bits; a mailbox transporta palavras de 32 bits. O chip-select deve permanecer
-ativo durante cabeçalho e payload.
+A identificação anterior como ZSI veio do argumento `type=ZSI` passado a
+`slic3_sep.ko`. Ela não representa a seleção final do driver DXS: na decompilação
+específica do Nokia, `dxs_init_spi()` força `slicInterfType=3` e chama
+`SPI_cfg()`/`SPI_Reset(3)`. No `spi.ko` correspondente, 3 seleciona **CSI**.
+O modo lógico e o enquadramento são diferentes de ZSI, embora ambos selecionem
+5 no campo de interface de SYS SCU + 0x94.
 
-## Topologia elétrica
+O compatible correto é `econet,en751221-csi-spi`. O antigo
+`econet,en751221-zsi-spi` foi removido; o driver ZSI para Zarlink permanece.
+Para EN7523, usa-se `airoha,en7523-csi-spi`.
 
-O BBD define coeficientes de linha, ringing, alimentação DC e a topologia do
-conversor. O arquivo histórico `firmware/dxs/DXS_BBD.bin` coincide exatamente
-com `dcdc_CIBB12/R600.bin` do pacote oficial:
+## Protocolo recuperado
 
-| Campo      | Valor confirmado                                                   |
-| ---------- | ------------------------------------------------------------------ |
-| DC/DC      | CIBB12                                                             |
-| Impedância | 600 ohms                                                           |
-| Tamanho    | 498 bytes                                                          |
-| SHA-256    | `e0c84932582aa8a2931c59d910896f9b1184d189f59af1574ef8fc586354261d` |
+DXS utiliza cabeçalho `7e offset` para escrita e `be offset` para leitura,
+com palavras em ordem de bytes big endian. O mailbox é o registro 0x14.
+O framing CSI abaixo aparece tanto no Nokia quanto no MitraStar:
 
-Os dois arquivos no repositório são idênticos aos usados no rootfs de produção
-da Nokia G-240G-E:
+| Operação | Framing CSI implementado |
+|---|---|
+| Escrita de um registro de 16 bits | dois bytes de cabeçalho + palavra duplicada; exemplo `7e 06 12 34 12 34` |
+| Leitura | dois bytes de cabeçalho, depois leitura de 10 bytes; descarta o primeiro byte e aproveita até 4 bytes |
+| Mailbox | fragmentos de até 4 bytes, sem duplicar a palavra e sem auto-incremento |
+| Configuração do wrapper | `(CFG & 0xe0ffffef) \| 0x0f000010`; intervalo de 10 µs entre bytes |
 
-| Arquivo       | SHA-256                                                            |
-| ------------- | ------------------------------------------------------------------ |
-| `DXS_FW.bin`  | `708f929decc967544c03295dbc7601ec6eda24c7197166d1d757afcabf3dd882` |
-| `DXS_BBD.bin` | `e0c84932582aa8a2931c59d910896f9b1184d189f59af1574ef8fc586354261d` |
+As peculiaridades CSI ficam restritas aos dois compatibles CSI. O caminho SPI
+convencional conserva o auto-incremento e o enquadramento original.
+No EN751221, os gates recuperados de `pcm1.ko` são chip SCU + 0xd8 bit 0 e
++ 0x148 bits 2/3. O pinctrl controla o mux; não foi inventado um divisor absoluto.
+No EN7523 foi mantida a sequência existente de clock/APLL do wrapper;
+clocks e timing CSI ainda precisam de medição na placa.
 
-Isso confirma CIBB12/R600 para essa placa específica, mas não prova que toda placa com
-PEF32001/PEF32002 usa CIBB12. Antes de habilitar line feed ou ringing em outra
-placa, a topologia precisa ser confirmada pelo esquema, BOM ou pelo firmware
-stock da própria placa.
+## Firmware e BBD por placa
 
-## Arquitetura escolhida
+| Imagem | Evidência | Tamanho | SHA-256 |
+|---|---|---|---|
+| Nokia `DXS_FW.bin` | arquivo stock; cabeçalho 2.1.0 | 16984 | `708f929decc967544c03295dbc7601ec6eda24c7197166d1d757afcabf3dd882` |
+| MitraStar `DXS_FW_mitrastar.bin` | embutido nos três módulos Intel recuperados; cabeçalho 2.1.3 | 20168 | `779afa0255e079319ccb264acba714816505c7bcda60c73b967b0c2259dae824` |
+| `DXS_BBD.bin` | stock Nokia, presente nos três módulos MitraStar e idêntico ao perfil oficial `coef_dxs-0.0.9/dcdc_CIBB12/R600.bin` | 498 | `e0c84932582aa8a2931c59d910896f9b1184d189f59af1574ef8fc586354261d` |
 
-O código MaxLinear inclui TAPI, parser BBD, download de firmware, mailbox,
-ring, hook, PCM e testes de linha. Reescrever essas máquinas de estado em um
-driver pequeno descartaria validações importantes. A primeira integração mantém
-o `drv_tapi_dxs` como módulo independente. Uma ponte posterior usa a Kernel API
-TAPI (`ifx_tapi_kopen`, `ifx_tapi_kioctl`, `ifx_tapi_kclose`) para registrar as
-linhas no `en75xx_voice`, sem duplicar o controle elétrico.
+No MitraStar, `IntelSlicInit()` passa o endereço `.data + 0x94` e tamanho 0x4ec8
+a `DXS_DwldAndStartFW()`; as relocations ARM confirmam o símbolo `.LANCHOR2`.
+Nos módulos `slic3_intel.ko` e `slic3_intel_latam_25.ko`, o blob começa no offset
+183884; no `slic3_intel_latam_25_BR.ko`, em 185020. O extrator procura o cabeçalho
+e exige o hash completo, em vez de confiar somente nesses offsets.
 
-O módulo não deve ser carregado automaticamente até existirem:
+Extraia do módulo OEM disponível localmente **antes** de compilar o pacote:
 
-1. seleção explícita da topologia DC/DC por placa;
-2. firmware e BBD correspondentes à revisão e ao circuito;
-3. nó SPI mode 3 com reset correto;
-4. configuração PCM com slots iguais aos programados no EN75xx;
-5. ponte TAPI para `/dev/en75xx-fxsN` ou suporte equivalente no userspace.
-
-## Matriz de placas confirmada
-
-| SoC      | Placa                     | SLIC               | Situação do transporte                                    |
-| -------- | ------------------------- | ------------------ | --------------------------------------------------------- |
-| EN751221 | Nokia G-240G-E            | 1× PEF32002, 2 FXS | ZSI; stack stock, clock/route, firmware e BBD confirmados |
-| EN7580   | Nokia XS-2426G-A          | PEF32002           | CSI; roteamento/clock do SoC ainda pendente               |
-| EN7523   | MitraStar GPT-2742GX4X5v6 | PEF32001           | CSI e build OEM CIBB12 confirmados                        |
-| EN7523   | Askey RTF8225VW           | PEF32001           | CSI e build OEM CIBB12 confirmados                        |
-
-Nos dois rootfs EN7523, `voip_loader` suporta um ou dois dispositivos e
-acrescenta `devNum=2` somente quando a detecção encontra o segundo SLIC.
-Portanto, a quantidade de linhas não deve ser inferida apenas pelo PEF32001.
-
-Na G-240G-E, o arquivo de hardware declara duas portas POTS com PEF32002, mas
-o carregador confirma `devNum=1` e `pcm1ChNum=2`: um único DXS102 de dois
-canais usando dois slots do PCM1.
-
-## Device Tree mínimo para EN751221/ZSI
-
-```dts
-zsi0: spi@1fbd1000 {
-	compatible = "econet,en751221-zsi-spi";
-	reg = <0x1fbd1000 0x1000>;
-	reg-names = "zsi";
-	airoha,scu = <&scuclk>;
-	airoha,chip-scu = <&chip_scu>;
-	airoha,legacy-scu-programming;
-	resets = <&scuclk EN751221_PCM1_ZSI_ISI_RST>;
-	reset-names = "zsi";
-	pinctrl-names = "default";
-	pinctrl-0 = <&pcm_spi_pins>;
-	airoha,zsi-gap-us = <5000>;
-	#address-cells = <1>;
-	#size-cells = <0>;
-
-	dxs@0 {
-		compatible = "maxlinear,pef32002";
-		reg = <0>;
-		spi-max-frequency = <2000000>;
-		spi-cpol;
-		spi-cpha;
-		reset-gpios = <&gpio N GPIO_ACTIVE_HIGH>;
-		reset-interval-ms = <10>;
-	};
-};
+```sh
+python3 tools/extract-dxs-mitrastar.py /caminho/slic3_intel.ko \
+    firmware/dxs/DXS_FW_mitrastar.bin
 ```
 
-O número do GPIO de reset ainda deve vir do DTS ou esquema da placa. A
-sequência stock `gpio_tool write 254 1,0,1` parece endereçar um framework
-lógico OEM e não basta para colocar GPIO 254 no DT Linux.
+O pacote OpenWrt inclui essa imagem quando o arquivo existe. O firmware Nokia
+não é usado como fallback silencioso no MitraStar. O perfil CIBB12/R600 é
+específico do circuito; não equivale a confirmar sua adequação regulatória
+para qualquer país ou outra placa PEF3200x. O parser original valida o BBD e a
+topologia compilada. O firmware oficial 2.1.9 recuperado do SDK não substitui
+automaticamente as imagens OEM.
 
-## Device Tree mínimo para EN7523/CSI
+## Integração implementada
 
-```dts
-csi: spi@1fbd1000 {
-	compatible = "airoha,en7523-csi-spi";
-	reg = <0x1fbd1000 0x100>;
-	/* clocks, resets e phandles SCU iguais ao nó ISI do SoC */
+O backend preserva TAPI, download de firmware, mailbox, parser BBD, controle de
+alimentação e ringing da MaxLinear. A ponte usa a Kernel API TAPI3 para as
+operações de linha. Firmware e BBD têm entradas específicas para buffers do
+kernel: não passam ponteiros de `request_firmware()` por `copy_from_user()`.
 
-	dxs@0 {
-		compatible = "maxlinear,pef32001";
-		reg = <0>;
-		spi-max-frequency = <2000000>;
-		spi-cpol;
-		spi-cpha;
-		reset-gpios = <&gpio N GPIO_ACTIVE_HIGH>;
-		reset-interval-ms = <10>;
-	};
-};
+A ponte configura PCM linear de 16 bits/8 kHz, hook, linefeed, cadência e
+ring trip; consulta eventos a cada 20 ms. Os IDs de fault ficam disponíveis na
+ABI como o último evento de falha TAPI observado. IRQ externo do DXS não foi
+presumido: este port usa o polling do backend. O IRQ do PCM continua vindo do DTS.
+O registro de linhas reutiliza `en75xx_voice`, permitindo o mesmo teste PCM e
+`chan_en75xx` após inicialização bem-sucedida.
+
+A numeração TAPI é estável pelo chip select, com override opcional
+`airoha,tapi-device`. Corrigidos reset com polaridade lógica do GPIO,
+propagação de probe defer, registro único do driver SPI, limpeza de mutexes
+após falha e major dinâmico sem truncamento em 8 bits.
+
+## DTS e sequência de teste
+
+Inclua somente o fragmento da placa depois do DTS base do SoC. Eles esperam
+os labels `scuclk`, `chip_scu`, `pinctrl`, `pcm0` e os bindings de clock/reset
+do kernel. O fragmento importa a definição voice do repositório; não inclua
+novamente essa mesma definição no DTS da placa. CSI substitui a alternativa ZSI
+no mesmo endereço. Não mantenha outro cliente ISI/SLIC ativo nesse wrapper.
+
+Não foi atribuído um GPIO de reset físico: o `gpio_tool write 254` stock é uma
+interface lógica OEM e não prova Linux GPIO 254. Acrescente `reset-gpios` e sua
+polaridade somente quando confirmados. Sem essa propriedade, o backend depende
+do estado de reset externo/boot; a tentativa de acesso pode falhar.
+
+Selecione `kmod-en75xx-slic-dxs-cibb12` no OpenWrt. Ele inclui `drv_tapi_dxs.ko`
+e `en75xx-slic-dxs.ko`, com as dependências PCM/serial e firmware. O DXS não é
+autocarregado por este pacote. Para o primeiro teste com o DTS em identify:
+
+```sh
+modprobe drv_tapi_dxs
+modprobe en75xx-slic-dxs
+dmesg | grep -Ei 'dxs|csi|en75xx'
 ```
 
-Os GPIOs e a polaridade de reset continuam pendentes de confirmação por
-placa. O transporte CSI não autoriza por si só o download do BBD nem a
-ativação de linefeed/ringing.
+O resultado esperado é `DXS access test passed`. **Não** se espera
+`/dev/en75xx-fxs*` em identify. Se o acesso falhar, confira reset, mux, clocks
+e framing antes de avançar.
 
-O driver original usa os nomes legados `intel,reset-gpios` e
-`intel,reset-interval`. A adaptação para DT moderno deve aceitar
-`reset-gpios` e `reset-interval-ms`, mantendo os nomes antigos como fallback.
+Para habilitar voice, o nó `&dxs_fxs` deve mudar `airoha,bringup-mode` para
+`"voice"` e declarar `clock-frequency`, `maxlinear,pcm-tx-edge` e
+`maxlinear,pcm-rx-edge`. As edges são da perspectiva do DXS: 0=subida,
+1=descida. A frequência é o DCL PCM, não `spi-max-frequency`. O backend aceita
+1.024/2.048/4.096/8.192 MHz neste adaptador. Use a frequência e as edges
+verificadas no hardware; não foram fixadas nos DTS de identificação.
+Firmware, BBD e `maxlinear,dcdc-topology = "CIBB12"` já estão explícitos.
+
+Slots TAPI contam bytes; a tabela do SoC conta bits. A ponte programa
+**DXS RX = SoC TX / 8** e **DXS TX = SoC RX / 8**. O exemplo MitraStar usa
+bits TX/RX 24/32, seguindo os slots RX/TX 3/4 de `IntelSlicInit()`.
+O exemplo Nokia usa bits 32/48 para os dois canais em ambas as direções;
+essa escolha é consistente internamente, mas ainda depende de validação do
+framing PCM e do clock da placa.
+
+Após voice inicializar e registrar as linhas, teste info/hook, depois áudio em
+baixo nível e somente então ringing. O acesso CSI bem-sucedido não comprova o
+caminho de áudio nem a parte analógica. Nenhuma afirmação de ausência de risco
+elétrico é feita por este port ainda não validado.
+
+## Compilação e validação executadas
+
+`tools/build-dxs.sh` compila primeiro o backend e passa seu `Module.symvers`
+ao Kbuild da ponte. Exige um kernel preparado e sua toolchain; aceita argumentos
+extras do configure. A integração OpenWrt usa a mesma ordem de compilação.
+
+Validação nesta sessão:
+
+- 11 testes host passaram, incluindo funções C reais de acesso DXS com I/O
+  simulado: CSI nos dois compatibles, prefixo, padding, mailbox, erro de
+  transporte e preservação do SPI convencional.
+- O extrator recuperou a mesma imagem dos três módulos MitraStar e rejeitou
+  dados truncados/corrompidos.
+- Backend e módulos EN75xx compilaram contra Linux 6.18.55, commit
+  `21c8344c030504a8e85dfb1c84cf4970e754302a`, configuração de compilação x86_64
+  com OF/SPI/GPIOLIB/REGMAP habilitados.
+- O kernel não foi compilado por completo: faltava seu `Module.symvers`, então
+  modpost foi executado com warnings para exports do kernel. Os exports entre
+  backend, ponte e núcleo EN75xx foram conferidos separadamente. Isso não
+  equivale a build OpenWrt completo, cross-build ARM/MIPS ou teste de carga.
+- Ambos os fragmentos DTS foram compilados com dtc e os DTS base reais desse
+  kernel. Warnings já existentes de I²C/switch/watchdog persistem; não foi
+  executado dt-schema nem validado o DTS completo de cada placa.
+
+## Fontes consultadas
+
+No `sdk_base` recuperado da biblioteca: `docs/maxlinear/617580_dxs_api_device_driver_pr_rev3.0.pdf`
+e `docs/maxlinear/PEF32001VSV13.pdf`; os módulos/decompilações Nokia em
+`reverse/en751221/nokia-g_240g_e/` e MitraStar em `reverse/en7523/ghidra/mitrastar/`.
+O PDF da API DxsInit/DxsBBD não substitui os headers da API TAPI deste port.
+Os trechos Ghidra foram usados como evidência de comportamento e confrontados
+com relocations/bytes ELF; não foram tratados como fontes C recompiláveis.
+O rootfs MitraStar forneceu os módulos usados nas comparações de firmware/BBD.

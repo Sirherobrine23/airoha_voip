@@ -802,3 +802,26 @@ IFX_int32_t DXS_Version (DXS_DEVICE_t *pDev, DXS_IO_Version_t *pInd)
 
    return DXS_statusOk;
 }
+
+#ifdef __KERNEL__
+#include "en75xx_dxs_kernel.h"
+int en75xx_dxs_kernel_version(unsigned int index, u32 *hw, u32 *fw, unsigned int *channels)
+{
+   DXS_DEVICE_t *pDev;
+   DXS_IO_Version_t version = {0};
+   int ret;
+
+   if (!hw || !fw || !channels || DXS_GetDevice(index, &pDev) != DXS_statusOk ||
+       !(pDev->nDevState & DS_BASIC_INIT))
+      return -EINVAL;
+   ret = DXS_Version(pDev, &version);
+   if (ret != DXS_statusOk)
+      return -EIO;
+   *hw = version.nHwRev;
+   *fw = version.nFwRev;
+   *channels = version.nFxsCh;
+   return 0;
+}
+EXPORT_SYMBOL_GPL(en75xx_dxs_kernel_version);
+
+#endif

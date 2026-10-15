@@ -1135,6 +1135,24 @@ int en75xx_pcm_channel_bit_offset(struct en75xx_pcm *pub, unsigned int channel)
 }
 EXPORT_SYMBOL_GPL(en75xx_pcm_channel_bit_offset);
 
+int en75xx_pcm_channel_offsets(struct en75xx_pcm *pub, unsigned int channel,
+			       int *txbit, int *rxbit)
+{
+	struct en75xx_pcm_dev *pcm = to_pcm_dev(pub);
+	u32 tx;
+
+	if (channel >= EN75XX_PCM_MAX_CHANNELS || !txbit || !rxbit ||
+	    !(pcm->dma_channel_mask & BIT(channel)))
+		return -EINVAL;
+	tx = pcm->tx_slots[channel / 2];
+	*txbit = (channel & 1) ? FIELD_GET(EN75XX_PCM_TS_HI_NUM, tx) :
+				FIELD_GET(EN75XX_PCM_TS_LO_NUM, tx);
+	*rxbit = en75xx_pcm_channel_bit_offset(pub, channel);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(en75xx_pcm_channel_offsets);
+
+
 /*
  * Resolve a PCM *bus* timeslot to the DMA channel that carries it.
  *

@@ -153,20 +153,17 @@ IFX_int32_t DXS_WaitForSddOpmodeChEvt(DXS_CHANNEL_t *pCh)
 
 IFX_void_t DXS_GPIO_Reset(DXS_DEVICE_t *pDev, int reset)
 {
-   TAPI_UNUSED(reset);
-
 #ifdef TAPI_LINUX_KERNEL_SPACE
-   if (!IS_ERR_OR_NULL(pDev->pResetGpio) &&
-      (pDev->nResetInterval >= GPIO_RESET_INTERVAL_MIN_VALUE) &&
-      (pDev->nResetInterval <= GPIO_RESET_INTERVAL_MAX_VALUE))
+   if (!IS_ERR_OR_NULL(pDev->pResetGpio))
    {
-      gpiod_set_raw_value_cansleep(pDev->pResetGpio, 0);
-      mdelay(pDev->nResetInterval);
-      gpiod_set_raw_value_cansleep(pDev->pResetGpio, 1);
+      /* Logical reset: respect GPIO_ACTIVE_LOW/HIGH from Device Tree. */
+      gpiod_set_value_cansleep(pDev->pResetGpio, !!reset);
+      msleep(pDev->nResetInterval);
    }
 #else
    TAPI_UNUSED(pDev);
-#endif /* TAPI_LINUX_KERNEL_SPACE */
+   TAPI_UNUSED(reset);
+#endif
 }
 
 
@@ -197,25 +194,18 @@ static int __init dxs_module_init(void)
    }
 
    ret = DXS_DeviceDriverStart();
-
-#ifdef __LINUX_SPI_H
+   if (ret != DXS_statusOk)
    {
-      IFX_uint8_t i = 0;
-
-      for (i = 0; i < DXS_MAX_DEVICES; i++)
-      {
-         DXS_DEVICE_t *pDev = IFX_NULL;
-
-         if (DXS_GetDevice(i, &pDev) == DXS_statusOk)
-         {
-            dxs_init_spi(pDev);
-         }
-      }
+      ifx_tapi_module_exit();
+      return -EIO;
    }
-#endif /* __LINUX_SPI_H */
-
-   /* Report error codes as negative numbers. */
-   return -ret;
+   ret = DXS_SPI_ModuleInit();
+   if (ret)
+   {
+      DXS_DeviceDriverStop();
+      ifx_tapi_module_exit();
+   }
+   return ret;
 }
 
 
@@ -227,21 +217,7 @@ static int __init dxs_module_init(void)
 */
 static void __exit dxs_module_exit(void)
 {
-#ifdef __LINUX_SPI_H
-   {
-      IFX_uint8_t i;
-
-      for(i = 0; i < DXS_MAX_DEVICES; i++)
-      {
-         DXS_DEVICE_t *pDev;
-
-         if(DXS_GetDevice(i, &pDev) == DXS_statusOk)
-         {
-            dxs_exit_spi(pDev);
-         }
-      }
-   }
-#endif /* __LINUX_SPI_H */
+   DXS_SPI_ModuleExit();
 
    DXS_DeviceDriverStop();
 

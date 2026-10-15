@@ -109,7 +109,7 @@ DXS_SPEC_DIST = dxs/drv_dxs_linux.c
 
 endif
 
-EXTRA_DIST = \
+EXTRA_DIST = dxs/en75xx_dxs_kernel.h \
    ../include/drv_dxs_errno.h \
    ../include/drv_dxs_strerrno.h \
    ../include/drv_dxs_io.h \

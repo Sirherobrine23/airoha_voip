@@ -24,3 +24,18 @@ The MaxLinear binary firmware and coefficient packages have their own license.
 Keep locally obtained releases outside the source tree unless their exact
 redistribution terms have been reviewed. The driver source under
 `vendor/maxlinear/` is separately offered under GPL-2.0 or BSD-2-Clause.
+
+## MitraStar GPT-2742GX4X5v6
+
+The three recovered OEM Intel modules embed a different PRAM image: 20,168
+bytes, header version 2.1.3, SHA-256
+`779afa0255e079319ccb264acba714816505c7bcda60c73b967b0c2259dae824`.
+`tools/extract-dxs-mitrastar.py` recovers and verifies it from any of those
+modules. Save the result as `firmware/dxs/DXS_FW_mitrastar.bin` before an
+OpenWrt build; the firmware package includes it when present. This locally
+extracted file is ignored by git. Both board blobs remain explicitly selected
+by DTS; there is no implicit fallback between them.
+
+All three modules also contain the exact same `DXS_BBD.bin` CIBB12/R600 image.
+See `docs/09-maxlinear-dxs-port.*.md` for offsets, source trace, bring-up modes
+and remaining hardware checks.

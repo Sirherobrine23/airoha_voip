@@ -32,14 +32,17 @@ endef
 
 define Package/en75xx-dxs-firmware/description
  PRAM patch and BBD coefficient blobs for the PEF32001/PEF32002. The
- PRAM patch is optional -- without it the chip runs its ROM firmware --
- but the BBD is not.
+ adapter requires explicit board-selected PRAM and BBD images in voice
+ mode. The bundled PRAM targets Nokia G-240G-E.
 endef
 
 define Package/en75xx-dxs-firmware/install
 	$(INSTALL_DIR) $(1)/lib/firmware/airoha-voice
 	$(INSTALL_DATA) $(EN75XX_VOIP_SOURCE_DIR)/firmware/dxs/DXS_FW.bin $(1)/lib/firmware/airoha-voice/
 	$(INSTALL_DATA) $(EN75XX_VOIP_SOURCE_DIR)/firmware/dxs/DXS_BBD.bin $(1)/lib/firmware/airoha-voice/
+	if [ -f $(EN75XX_VOIP_SOURCE_DIR)/firmware/dxs/DXS_FW_mitrastar.bin ]; then \
+		$(INSTALL_DATA) $(EN75XX_VOIP_SOURCE_DIR)/firmware/dxs/DXS_FW_mitrastar.bin $(1)/lib/firmware/airoha-voice/; \
+	fi
 	$(INSTALL_DIR) $(1)/lib/firmware/voice
 	$(LN) /lib/firmware/airoha-voice/DXS_FW.bin \
 		$(1)/lib/firmware/voice/dxs_firmware.bin

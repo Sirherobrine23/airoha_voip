@@ -44,16 +44,16 @@ still needs per-board electrical and runtime validation.
 | ZSI transport                                     | EN751221 legacy sequence retained explicitly; modern EN7523 resources wired, runtime validation required             |
 | Le9642: profiles, slots, feed, ring cadence, hook | profiles and timeslot handling now match the vendor API; bench validation required                                   |
 | Si3219x adapter                                   | Si32192 validated over the EN75xx ISI controller on EN7528; broader board validation pending                         |
-| MaxLinear PEF32001/PEF32002 (DUSLIC-XS)           | official GPL driver imported; EN7523 CSI and EN751221 ZSI-to-SPI transports added; TAPI bridge and hardware validation pending |
+| MaxLinear PEF32001/PEF32002 (DUSLIC-XS)           | TAPI backend + CSI transports + FXS bridge implemented; board hardware validation pending |
 | Asterisk channel driver                           | draft implementation; build/runtime testing against the target Asterisk version required                             |
 
 ### Status Boards
 
-- [ ] EN751221: Nokia G-240G-E (1× MaxLinear PEF32002, 2 FXS, ZSI / `maxlinear,pef32002`)
+- [ ] EN751221: Nokia G-240G-E (1× MaxLinear PEF32002, 2 FXS, CSI / `maxlinear,pef32002`)
 - [x] EN7528: TP-Link XC220-G3v v1 (Si32192FM1 / `silabs,si32192`)
 - [ ] EN7580: Nokia XS-2426G-A (Maxlinear PEF32002 / `maxlinear,pef3200x`)
 - [ ] EN7523: TP-Link XX230V v1 and XX530V v1 (Si32192FM1 / `silabs,si32192`)
-- [ ] EN7523: MitraStar GPT-2742GX4X5v6 (Maxlinear PEF32001 / `maxlinear,pef3200x`)
+- [ ] EN7523: MitraStar GPT-2742GX4X5v6 (MaxLinear PEF32001, CSI / `maxlinear,pef32001`)
 - [ ] EN7523: Askey rtf8225vw (Maxlinear PEF32001 / `maxlinear,pef3200x`)
 
 ## Two SLIC families, two transports
