@@ -67,6 +67,7 @@
 #include <linux/platform_device.h>
 #include <linux/reset.h>
 #include <linux/spi/spi.h>
+#include <linux/string.h>
 
 #include "en75xx_scu.h"
 
@@ -84,6 +85,10 @@ MODULE_PARM_DESC(legacy_chan_sel, "write ISI_REG_CHAN_SEL before each transactio
 static bool en7528_pcm_clk = true;
 module_param_named(en7528_pcm_clk, en7528_pcm_clk, bool, 0644);
 MODULE_PARM_DESC(en7528_pcm_clk, "enable EN7528's chip-SCU PCM clock generator during ISI bring-up");
+
+static bool csi_trace;
+module_param_named(csi_trace, csi_trace, bool, 0644);
+MODULE_PARM_DESC(csi_trace, "Trace wrapper TX completion for the DXS channel-0 calibration command");
 
 /*
  * Wrapper block (0x1fbd1000 + id * 0x2000), shared with en75xx_zsi.c.
@@ -125,6 +130,7 @@ MODULE_PARM_DESC(en7528_pcm_clk, "enable EN7528's chip-SCU PCM clock generator d
 #define EN7523_CHIP_SCU_CLKSRC		0x214
 #define EN7523_CHIP_SCU_CLKSRC_MASK	0x003f3300u
 #define EN7523_CHIP_SCU_GPIO_DEV1	0x00001000u
+#define EN7523_CHIP_SCU_CSI_RESET	0x00000100u
 #define EN7523_CHIP_SCU_PINMUX		0x1d0
 #define EN7523_CHIP_SCU_PINMUX_MASK	0x00000c00u
 /* pcm1.ko init: 0x1d0 |= 1 (clock-out gate?) -- see pinmux_extra_set */
@@ -181,10 +187,19 @@ struct en75xx_isi_spi {
 	struct clk		*slic_clk;
 	spinlock_t		lock;
 	bool			csi;
+	bool			status_ack_rmw;
+	u32			last_tx_status;
+	u32			last_ack;
+	bool			trace_header_valid;
+	unsigned int		trace_header_done;
+	int			trace_header_ret;
+	u32			trace_header_status;
+	u32			trace_header_ack;
 };
 
 struct en75xx_isi_quirks {
 	bool csi;
+	bool status_ack_rmw;
 	bool needs_audio_pll;
 	bool needs_en7528_clk;
 	bool needs_en751221_clk;
@@ -195,6 +210,7 @@ struct en75xx_isi_quirks {
 	u32 chip_scu_gpio_dev1;
 	u32 chip_scu_pinmux_reg;
 	u32 chip_scu_pinmux_mask;
+	u32 chip_scu_pinmux_set;
 	u32 pinmux_extra_set;	/* EN7523-only; see file header, 0 elsewhere */
 };
 
@@ -268,17 +284,73 @@ static int isi_start_apll(struct en75xx_isi_spi *isi)
 /* Byte level                                                          */
 /* ------------------------------------------------------------------ */
 
+/*
+ * EN7523 OEM spi_wraper_{write_cmd,write_data,read_data}() re-read STATUS
+ * before acknowledging a byte. Match that sequence on the verified CSI
+ * target; keep the existing ISI and EN751221 behavior unchanged.
+ * The read must be fresh, particularly after reading RXDATA.
+ */
+static void isi_ack_status(struct en75xx_isi_spi *isi, u32 mask)
+{
+	if (isi->status_ack_rmw)
+		mask |= readl(isi->base + ISI_REG_STATUS);
+	isi->last_ack = mask;
+	writel(mask, isi->base + ISI_REG_STATUS);
+}
+
 static int isi_write_byte(struct en75xx_isi_spi *isi, u8 v)
 {
 	u32 status;
+	int ret;
 
 	writel(v, isi->base + ISI_REG_TXDATA);
-	if (readl_poll_timeout_atomic(isi->base + ISI_REG_STATUS, status,
+	ret = readl_poll_timeout_atomic(isi->base + ISI_REG_STATUS, status,
 				      status & ISI_STATUS_TX_DONE,
-				      ISI_POLL_US, ISI_TIMEOUT_US))
+				      ISI_POLL_US, ISI_TIMEOUT_US);
+	isi->last_tx_status = status;
+	if (ret)
 		return -ETIMEDOUT;
-	writel(ISI_STATUS_TX_DONE, isi->base + ISI_REG_STATUS);
+	isi_ack_status(isi, ISI_STATUS_TX_DONE);
 	return 0;
+}
+
+/*
+ * CSI messages are serialized by the SPI core. Cache the opmode header's
+ * completion and report it only after the following calibration payload.
+ * This avoids inserting console output between the two mailbox fragments.
+ * These counters describe wrapper completion, not DXS command acceptance.
+ */
+static void en75xx_csi_trace_tx(struct en75xx_isi_spi *isi, const u8 *tx,
+			      unsigned int len, unsigned int done, int ret)
+{
+	static const u8 header[] = { 0x7e, 0x14, 0x01, 0x00, 0x07, 0x04 };
+	static const u8 payload[] = { 0x7e, 0x14, 0x00, 0x06, 0x00, 0x00 };
+
+	if (!csi_trace || !isi->csi) {
+		isi->trace_header_valid = false;
+		return;
+	}
+	if (len == sizeof(header) && !memcmp(tx, header, sizeof(header))) {
+		isi->trace_header_valid = true;
+		isi->trace_header_done = done;
+		isi->trace_header_ret = ret;
+		isi->trace_header_status = isi->last_tx_status;
+		isi->trace_header_ack = isi->last_ack;
+		return;
+	}
+	if (isi->trace_header_valid && len == sizeof(payload) &&
+	    !memcmp(tx, payload, sizeof(payload))) {
+		dev_info(isi->dev,
+			 "CSI calibration header tx=%*ph done=%u/6 ret=%d last_status=%#x last_ack=%#x\n",
+			 (int)sizeof(header), header, isi->trace_header_done,
+			 isi->trace_header_ret, isi->trace_header_status,
+			 isi->trace_header_ack);
+		dev_info(isi->dev,
+			 "CSI calibration payload tx=%*ph done=%u/6 ret=%d last_status=%#x last_ack=%#x\n",
+			 (int)sizeof(payload), tx, done, ret,
+			 isi->last_tx_status, isi->last_ack);
+	}
+	isi->trace_header_valid = false;
 }
 
 static int isi_read_byte(struct en75xx_isi_spi *isi, u8 *v)
@@ -291,7 +363,7 @@ static int isi_read_byte(struct en75xx_isi_spi *isi, u8 *v)
 				      ISI_POLL_US, ISI_TIMEOUT_US))
 		return -ETIMEDOUT;
 	*v = readl(isi->base + ISI_REG_RXDATA) & 0xff;
-	writel(ISI_STATUS_RX_READY, isi->base + ISI_REG_STATUS);
+	isi_ack_status(isi, ISI_STATUS_RX_READY);
 	return 0;
 }
 
@@ -309,7 +381,7 @@ static int en75xx_isi_spi_transfer_one(struct spi_controller *host,
 {
 	struct en75xx_isi_spi *isi = spi_controller_get_devdata(host);
 	unsigned long flags;
-	unsigned int i;
+	unsigned int i = 0;
 	int ret = 0;
 
 	spin_lock_irqsave(&isi->lock, flags);
@@ -337,6 +409,10 @@ static int en75xx_isi_spi_transfer_one(struct spi_controller *host,
 	}
 
 	spin_unlock_irqrestore(&isi->lock, flags);
+	if (xfer->tx_buf)
+		en75xx_csi_trace_tx(isi, xfer->tx_buf, xfer->len, i, ret);
+	else
+		isi->trace_header_valid = false;
 	return ret;
 }
 
@@ -383,12 +459,9 @@ static int en75xx_isi_spi_hw_init(struct en75xx_isi_spi *isi,
 	}
 
 	if (quirks->chip_scu_clksrc_reg) {
-		/*
-		 * ISI branch of set_gpio_clocksrc(): write(clksrc_reg,
-		 * (read & ~clksrc_mask) | gpio_dev1); write(pinmux_reg,
-		 * read & ~pinmux_mask), the latter ORed with the SoC's
-		 * extra bit (0 except on EN7523) since this driver only
-		 * ever takes the ISI path.
+		/* OEM set_gpio_clocksrc(): CSI sets the PSCLK route, while ISI
+		 * clears it. CSI also enables the dedicated reset pad in CLKSRC.
+		 * The one-device selection uses PCM1, without taking PCM2 pads.
 		 */
 		ret = en75xx_scu_update(&isi->scu, quirks->chip_scu_clksrc_reg,
 					quirks->chip_scu_clksrc_mask,
@@ -396,7 +469,7 @@ static int en75xx_isi_spi_hw_init(struct en75xx_isi_spi *isi,
 		if (!ret)
 			ret = en75xx_scu_update(&isi->scu, quirks->chip_scu_pinmux_reg,
 						quirks->chip_scu_pinmux_mask | quirks->pinmux_extra_set,
-						quirks->pinmux_extra_set);
+						quirks->chip_scu_pinmux_set | quirks->pinmux_extra_set);
 		if (ret)
 			return dev_err_probe(isi->dev, ret,
 					     "cannot route the SLIC clock source\n");
@@ -462,6 +535,7 @@ static int en75xx_isi_spi_probe(struct platform_device *pdev)
 	isi = spi_controller_get_devdata(host);
 	isi->dev = dev;
 	isi->csi = quirks->csi;
+	isi->status_ack_rmw = quirks->status_ack_rmw;
 	spin_lock_init(&isi->lock);
 
 	isi->base = devm_platform_ioremap_resource_byname(pdev, "isi");
@@ -515,7 +589,9 @@ static int en75xx_isi_spi_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "cannot register SPI controller\n");
 
-	dev_info(dev, "%s SPI controller ready\n", isi->csi ? "CSI" : "ISI");
+	dev_info(dev, "%s SPI controller ready (status ACK %s, calibration trace available)\n",
+		 isi->csi ? "CSI" : "ISI",
+		 isi->status_ack_rmw ? "read/OR/write" : "mask-only");
 	return 0;
 }
 
@@ -542,12 +618,14 @@ static const struct en75xx_isi_quirks en7528_isi_quirks = {
 /* Askey RTF8225VW and MitraStar GPT-2742GX4X5v6 use CSI for PEF32001. */
 static const struct en75xx_isi_quirks en7523_csi_quirks = {
 	.csi = true,
+	.status_ack_rmw = true,
 	.needs_audio_pll = true,
 	.chip_scu_clksrc_reg = EN7523_CHIP_SCU_CLKSRC,
 	.chip_scu_clksrc_mask = EN7523_CHIP_SCU_CLKSRC_MASK,
-	.chip_scu_gpio_dev1 = EN7523_CHIP_SCU_GPIO_DEV1,
+	.chip_scu_gpio_dev1 = EN7523_CHIP_SCU_GPIO_DEV1 | EN7523_CHIP_SCU_CSI_RESET,
 	.chip_scu_pinmux_reg = EN7523_CHIP_SCU_PINMUX,
 	.chip_scu_pinmux_mask = EN7523_CHIP_SCU_PINMUX_MASK,
+	.chip_scu_pinmux_set = EN7523_CHIP_SCU_PINMUX_MASK,
 	.pinmux_extra_set = EN7523_CHIP_SCU_PINMUX_EXTRA,
 };
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* MaxLinear DXS TAPI to EN75xx PCM/FXS adapter. */
 #include <linux/device.h>
+#include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -16,6 +17,14 @@
 #include <drv_dxs_io.h>
 
 #define DXS_LINES 2
+
+static char *bringup_mode;
+module_param(bringup_mode, charp, 0444);
+MODULE_PARM_DESC(bringup_mode, "Override DTS mode: identify, firmware, start, bbd or voice");
+
+static unsigned int stage_wait_ms = 1000;
+module_param(stage_wait_ms, uint, 0444);
+MODULE_PARM_DESC(stage_wait_ms, "Diagnostic stage settling time (100..60000 ms); unused in voice mode");
 
 struct en75xx_dxs;
 struct en75xx_dxs_line {
@@ -43,6 +52,7 @@ struct en75xx_dxs {
 	bool started;
 	bool stopping;
 	u32 faults;
+	u32 loaded_fw;
 };
 
 static int dxs_ioctl(struct en75xx_dxs *dxs, IFX_TAPI_KIO_HANDLE handle,
@@ -249,7 +259,7 @@ static int dxs_pcm_settings(struct en75xx_dxs *dxs)
 {
 	IFX_TAPI_PCM_IF_CFG_t *cfg = &dxs->pcm_cfg;
 	struct device_node *np = dxs->dev->of_node;
-	u32 freq, edge;
+	u32 freq, edge, offset;
 
 	/* Require board settings instead of silently inheriting ProSLIC timing. */
 	if (of_property_read_u32(np, "clock-frequency", &freq) ||
@@ -259,6 +269,20 @@ static int dxs_pcm_settings(struct en75xx_dxs *dxs)
 	if (of_property_read_u32(np, "maxlinear,pcm-rx-edge", &edge) || edge > 1)
 		return -EINVAL;
 	cfg->nSlopeRX = edge;
+	/* Bit offsets are separate from the byte slots configured below.
+	 * The MitraStar OEM IntelSlicInit programs TX=7 and RX=1.
+	 * Keep zero for boards without an explicit offset property.
+	 */
+	if (of_find_property(np, "maxlinear,pcm-tx-offset", NULL)) {
+		if (of_property_read_u32(np, "maxlinear,pcm-tx-offset", &offset) || offset > 7)
+			return -EINVAL;
+		cfg->nOffsetTX = offset;
+	}
+	if (of_find_property(np, "maxlinear,pcm-rx-offset", NULL)) {
+		if (of_property_read_u32(np, "maxlinear,pcm-rx-offset", &offset) || offset > 7)
+			return -EINVAL;
+		cfg->nOffsetRX = offset;
+	}
 	cfg->nOpMode = IFX_TAPI_PCM_IF_MODE_SLAVE;
 	cfg->nDrive = IFX_TAPI_PCM_IF_DRIVE_ENTIRE;
 	cfg->nTsSync = IFX_TAPI_PCM_IF_TS_SYNC_FRAME;
@@ -269,6 +293,9 @@ static int dxs_pcm_settings(struct en75xx_dxs *dxs)
 	case 8192000: cfg->nDCLFreq = IFX_TAPI_PCM_IF_DCLFREQ_8192; break;
 	default: return -EINVAL;
 	}
+	dev_info(dxs->dev, "DXS PCM: %u Hz, TX/RX edges %u/%u, offsets %u/%u bits\n",
+		 freq, (unsigned int)cfg->nSlopeTX, (unsigned int)cfg->nSlopeRX,
+		 (unsigned int)cfg->nOffsetTX, (unsigned int)cfg->nOffsetRX);
 	return 0;
 }
 
@@ -311,6 +338,63 @@ static int dxs_configure_pcm(struct en75xx_dxs *dxs)
 	return 0;
 }
 
+/* This stage only uses control/mailbox commands. No BBD or linefeed. */
+static int dxs_boot_firmware(struct en75xx_dxs *dxs, const struct firmware *fw)
+{
+	u32 hw, version;
+	unsigned int count;
+	int ret;
+
+	ret = en75xx_dxs_kernel_version(dxs->index, &hw, &version, &count);
+	if (ret)
+		return ret;
+	dev_info(dxs->dev, "DXS ROM: HW %#x FW %#x, %u FXS\n", hw, version, count);
+	if (count != dxs->count) {
+		dev_err(dxs->dev, "DXS has %u FXS; DTS describes %u\n", count, dxs->count);
+		return -ENODEV;
+	}
+	ret = en75xx_dxs_kernel_firmware(dxs->index, fw->data, fw->size);
+	if (ret)
+		return ret;
+	ret = en75xx_dxs_kernel_version(dxs->index, &hw, &version, &count);
+	if (ret)
+		return ret;
+	if (count != dxs->count)
+		return -ENODEV;
+	dxs->loaded_fw = version;
+	dev_info(dxs->dev, "DXS firmware running: HW %#x FW %#x, %u FXS\n", hw, version, count);
+	return 0;
+}
+
+/* Always query the chip; never accept the driver's cached firmware version. */
+static int dxs_verify_firmware(struct en75xx_dxs *dxs, const char *stage)
+{
+	u32 hw, version;
+	unsigned int count;
+	int ret;
+
+	ret = en75xx_dxs_kernel_version(dxs->index, &hw, &version, &count);
+	if (ret) {
+		dev_err(dxs->dev, "DXS %s: version query failed: %d\n", stage, ret);
+		return ret;
+	}
+	dev_info(dxs->dev, "DXS %s: HW %#x FW %#x, %u FXS (expected FW %#x)\n",
+		 stage, hw, version, count, dxs->loaded_fw);
+	if (version != dxs->loaded_fw || count != dxs->count) {
+		dev_err(dxs->dev, "DXS %s: firmware identity changed; stopping bring-up\n", stage);
+		return -EIO;
+	}
+	return 0;
+}
+
+static int dxs_wait_stage(struct en75xx_dxs *dxs, const char *stage)
+{
+	dev_info(dxs->dev, "DXS %s: waiting %u ms before fresh version query\n",
+		 stage, stage_wait_ms);
+	msleep(stage_wait_ms);
+	return dxs_verify_firmware(dxs, stage);
+}
+
 static int en75xx_dxs_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev, *supplier;
@@ -324,6 +408,7 @@ static int en75xx_dxs_probe(struct platform_device *pdev)
 	u32 channels[DXS_LINES];
 	char name[24];
 	int count, ret, i, txbit, rxbit;
+	bool voice, start_only, bbd_only;
 
 	dxs = devm_kzalloc(dev, sizeof(*dxs), GFP_KERNEL);
 	if (!dxs)
@@ -362,7 +447,18 @@ static int en75xx_dxs_probe(struct platform_device *pdev)
 	}
 
 	of_property_read_string(dev->of_node, "airoha,bringup-mode", &mode);
-	if (strcmp(mode, "identify") && strcmp(mode, "voice")) {
+	if (bringup_mode)
+		mode = bringup_mode;
+	if (strcmp(mode, "identify") && strcmp(mode, "firmware") &&
+	    strcmp(mode, "start") && strcmp(mode, "bbd") && strcmp(mode, "voice")) {
+		ret = -EINVAL;
+		goto fail;
+	}
+	voice = !strcmp(mode, "voice");
+	start_only = !strcmp(mode, "start");
+	bbd_only = !strcmp(mode, "bbd");
+	if (!voice && strcmp(mode, "identify") &&
+	    (stage_wait_ms < 100 || stage_wait_ms > 60000)) {
 		ret = -EINVAL;
 		goto fail;
 	}
@@ -382,22 +478,28 @@ static int en75xx_dxs_probe(struct platform_device *pdev)
 			goto fail;
 		}
 	}
-	if (!strcmp(mode, "voice")) {
+	if (voice || bbd_only) {
 		if (of_property_read_string(dev->of_node, "maxlinear,dcdc-topology", &topology) ||
 		    strcmp(topology, "CIBB12") ||
-		    of_property_read_string(dev->of_node, "firmware-name", &fwname) ||
 		    of_property_read_string(dev->of_node, "maxlinear,bbd-firmware", &bbdname)) {
 			ret = -EINVAL;
 			goto fail;
 		}
-		/* Validate required clock/edge settings before any chip download. */
-		ret = dxs_pcm_settings(dxs);
+		if (voice) {
+			/* Validate required clock/edge settings before any chip download. */
+			ret = dxs_pcm_settings(dxs);
+			if (ret)
+				goto fail;
+		}
+		ret = request_firmware(&bbd, bbdname, dev);
+		if (ret)
+			goto fail;
+	}
+	if (strcmp(mode, "identify")) {
+		ret = of_property_read_string(dev->of_node, "firmware-name", &fwname);
 		if (ret)
 			goto fail;
 		ret = request_firmware(&fw, fwname, dev);
-		if (ret)
-			goto fail;
-		ret = request_firmware(&bbd, bbdname, dev);
 		if (ret)
 			goto fail;
 	}
@@ -417,28 +519,70 @@ static int en75xx_dxs_probe(struct platform_device *pdev)
 		platform_set_drvdata(pdev, dxs);
 		return 0;
 	}
-	/* Check the detected ROM/device channel count before firmware or BBD. */
-	ret = en75xx_dxs_kernel_version(dxs->index, &hw_version, &fw_version, &fxs_count);
-	if (ret || fxs_count != count) {
-		ret = ret ? ret : -EINVAL;
-		goto fail;
-	}
-	ret = en75xx_dxs_kernel_firmware(dxs->index, fw->data, fw->size);
+	ret = dxs_boot_firmware(dxs, fw);
 	if (ret)
 		goto fail;
+	if (!voice && !start_only && !bbd_only) {
+		ret = dxs_wait_stage(dxs, "after firmware download");
+		if (ret)
+			goto fail;
+		dev_info(dev, "DXS firmware test passed; no BBD, PCM activation or linefeed started\n");
+		platform_set_drvdata(pdev, dxs);
+		release_firmware(fw);
+		return 0;
+	}
 	ret = dxs_ioctl(dxs, dxs->handle, IFX_TAPI_DEV_START, &start);
 	if (ret)
 		goto fail;
 	dxs->started = true;
-	ret = en75xx_dxs_kernel_bbd(dxs->index, bbd->data, bbd->size);
+	ret = (start_only || bbd_only) ? dxs_wait_stage(dxs, "after DEV_START") :
+					 dxs_verify_firmware(dxs, "after DEV_START");
 	if (ret)
 		goto fail;
-	ret = en75xx_dxs_kernel_version(dxs->index, &hw_version, &fw_version, &fxs_count);
-	if (ret || fxs_count != count) {
-		ret = ret ? ret : -EINVAL;
+	if (start_only) {
+		dev_info(dev, "DXS DEV_START test passed; no BBD, PCM activation or linefeed started\n");
+		platform_set_drvdata(pdev, dxs);
+		release_firmware(fw);
+		return 0;
+	}
+	dev_info(dev, "DXS DEV_START completed; loading BBD %s (%zu bytes)\n",
+		 bbdname, bbd->size);
+	if (bbd_only)
+		ret = en75xx_dxs_kernel_bbd_prepare(dxs->index, bbd->data, bbd->size);
+	else
+		ret = en75xx_dxs_kernel_bbd(dxs->index, bbd->data, bbd->size);
+	if (ret) {
+		dev_err(dev, "DXS BBD download/calibration failed: %d\n", ret);
+		/* Read before dxs_shutdown() resets the chip. A version obtained
+		 * after cleanup cannot distinguish an unexpected reboot from ours.
+		 * Preserve the BBD error regardless of this diagnostic result.
+		 */
+		{
+			int version_ret = en75xx_dxs_kernel_version(dxs->index,
+							 &hw_version, &fw_version, &fxs_count);
+			if (!version_ret)
+				dev_err(dev, "DXS before cleanup: HW %#x FW %#x, %u FXS\n",
+					hw_version, fw_version, fxs_count);
+			else
+				dev_err(dev, "DXS before cleanup: version query failed: %d\n",
+					version_ret);
+		}
 		goto fail;
 	}
-	dev_info(dev, "DXS HW %#x FW %#x, %u FXS\n", hw_version, fw_version, fxs_count);
+	if (bbd_only) {
+		ret = dxs_wait_stage(dxs, "after BBD blocks, before calibration");
+		if (ret)
+			goto fail;
+		dev_info(dev, "DXS BBD blocks test passed; calibration pending; no PCM activation or linefeed started\n");
+		platform_set_drvdata(pdev, dxs);
+		release_firmware(bbd);
+		release_firmware(fw);
+		return 0;
+	}
+	dev_info(dev, "DXS BBD accepted: %zu bytes, topology %s\n", bbd->size, topology);
+	ret = dxs_verify_firmware(dxs, "after BBD calibration");
+	if (ret)
+		goto fail;
 	ret = dxs_configure_pcm(dxs);
 	if (ret)
 		goto fail;

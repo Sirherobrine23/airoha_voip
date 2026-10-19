@@ -90,6 +90,9 @@
 /* ========================================================================== */
 /*                           Function prototypes                              */
 /* ========================================================================== */
+/* Runtime HOST_CFG after firmware start; access-test setup stays separate. */
+extern IFX_uint16_t DXS_RuntimeHostConfig(DXS_DEVICE_t *pDev);
+
 extern IFX_void_t dxs_init_spi (
                         DXS_DEVICE_t *pDev);
 

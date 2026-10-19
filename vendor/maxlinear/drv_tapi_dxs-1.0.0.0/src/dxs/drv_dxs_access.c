@@ -25,6 +25,9 @@
 #include "../tapi/drv_tapi_debug_buffer.h"
 #ifdef __KERNEL__
 #include <linux/of.h>
+#include <linux/atomic.h>
+#include <linux/module.h>
+#include <linux/printk.h>
 #endif
 
 /* ========================================================================== */
@@ -77,6 +80,64 @@ static IFX_int32_t dxs_spi_read(
 
 static IFX_int32_t dxs_spi_setup (
                         DXS_DEVICE_t *pDev);
+
+/* Diagnostic window, armed only by a channel-0 ALM calibration command.
+   DXS access is serialized by its caller; atomics keep the bounded logging
+   budget safe against register observations from another context. */
+#ifdef __KERNEL__
+static bool mailbox_trace;
+module_param(mailbox_trace, bool, 0644);
+MODULE_PARM_DESC(mailbox_trace,
+   "Trace up to 32 mailbox/LEN/CFG fragments after channel-0 calibration request");
+static atomic_t dxs_wire_remaining[DXS_MAX_DEVICES];
+static atomic_t dxs_wire_sequence[DXS_MAX_DEVICES];
+
+static void dxs_trace_arm(DXS_DEVICE_t *dev, IFX_uint8_t offset,
+                          const IFX_uint16_t *buf, IFX_uint32_t len)
+{
+   IFX_uint32_t command[2];
+   unsigned int index = dev->nDevNr;
+
+   if (!READ_ONCE(mailbox_trace) || index >= DXS_MAX_DEVICES ||
+       offset != DXS_HOST_DATA || len != sizeof(command))
+      return;
+   memcpy(command, buf, sizeof(command));
+   if (command[0] != 0x01000704 || command[1] != 0x00060000)
+      return;
+   atomic_set(&dxs_wire_sequence[index], 0);
+   atomic_set(&dxs_wire_remaining[index], 32);
+   pr_info("en75xx-dxs-wire: device %u armed: header=%#x payload=%#x; software bytes, not a bus capture\n",
+           index, command[0], command[1]);
+}
+
+static void dxs_trace_fragment(DXS_DEVICE_t *dev, IFX_uint8_t offset,
+                               IFX_uint32_t position,
+                               const IFX_uint8_t *tx, unsigned int tx_len,
+                               const IFX_uint8_t *rx, unsigned int rx_len,
+                               IFX_int32_t ret)
+{
+   unsigned int index = dev->nDevNr;
+   unsigned int sequence;
+
+   if (!READ_ONCE(mailbox_trace) || index >= DXS_MAX_DEVICES ||
+       (offset != DXS_HOST_DATA && offset != DXS_HOST_LEN &&
+        offset != DXS_HOST_CFG))
+      return;
+   if (atomic_dec_if_positive(&dxs_wire_remaining[index]) < 0)
+      return;
+   sequence = atomic_inc_return(&dxs_wire_sequence[index]);
+   /* Failed reads may leave rx uninitialized: never dump it. */
+   if (ret == DXS_statusOk && rx && rx_len)
+      pr_info("en75xx-dxs-wire: device %u seq=%u reg=%#x pos=%u ret=0 tx=%*ph rx_raw=%*ph\n",
+              index, sequence, offset, position, (int)tx_len, tx, (int)rx_len, rx);
+   else
+      pr_info("en75xx-dxs-wire: device %u seq=%u reg=%#x pos=%u ret=%#x tx=%*ph rx_valid=0\n",
+              index, sequence, offset, position, (unsigned int)ret, (int)tx_len, tx);
+}
+#else
+#define dxs_trace_arm(dev, offset, buf, len) do { } while (0)
+#define dxs_trace_fragment(dev, offset, pos, tx, nt, rx, nr, ret) do { } while (0)
+#endif
 
 /* ========================================================================== */
 /*                         Function implementation                            */
@@ -465,6 +526,23 @@ static IFX_boolean_t dxs_is_csi(DXS_DEVICE_t *pDev)
 #endif
 }
 
+IFX_uint16_t DXS_RuntimeHostConfig(DXS_DEVICE_t *pDev)
+{
+   IFX_uint16_t cfg = DXS_REG_CFG_SC_MD_SCON | DXS_REG_CFG_8BIT_EN;
+
+   /* MitraStar drv_dxs-1.3.1.0 DXS_FW_Start writes 0x07 in CSI mode.
+      Bit zero selects interrupt polarity, not a reset or clock gate.
+      Limit this alignment to the EN7523 controller verified against OEM;
+      keep other controllers' settings and the access-test setup. */
+#ifdef __KERNEL__
+   if (pDev->pSpiDev &&
+       of_device_is_compatible(pDev->pSpiDev->controller->dev.of_node,
+                               "airoha,en7523-csi-spi"))
+      cfg |= DXS_REG_CFG_INT_MD_INTPOS;
+#endif
+   return cfg;
+}
+
 /**
    Write a number of bytes to a given DXS register using SPI.
 
@@ -491,6 +569,14 @@ IFX_int32_t dxs_spi_write(DXS_DEVICE_t *pDev,
                  fragment_length;
    IFX_int32_t   ret = DXS_statusOk;
    IFX_boolean_t csi = dxs_is_csi(pDev);
+#ifdef __KERNEL__
+   struct {
+      IFX_uint8_t bytes[SPI_MAXBYTES_SIZE];
+      unsigned int len, position;
+      IFX_int32_t ret;
+   } trace_tx[2];
+   unsigned int trace_count = 0, trace_i;
+#endif
 
 #ifdef __KERNEL__
    if (!pDev->pSpiDev)
@@ -507,6 +593,8 @@ IFX_int32_t dxs_spi_write(DXS_DEVICE_t *pDev,
       pDev->nErr = DXS_statusSpiAccErr;
       return DXS_statusSpiAccErr;
    }
+
+   dxs_trace_arm(pDev, offset, pbuf, len);
 
    /* This variable counts the number of bytes already written. */
    written = 0;
@@ -578,6 +666,20 @@ IFX_int32_t dxs_spi_write(DXS_DEVICE_t *pDev,
       /* Deactivate DXS by setting chip select line. (high means inactive) */
       SPI_CS_SET(pDev->nDevNr, IFX_HIGH);
 
+#ifdef __KERNEL__
+      /* Save actual prepared bytes; defer printing until the entire logical
+         write ends, so console output cannot separate its two ALM words. */
+      if (READ_ONCE(mailbox_trace) && (unsigned int)pDev->nDevNr < DXS_MAX_DEVICES &&
+          atomic_read(&dxs_wire_remaining[pDev->nDevNr]) > 0 && trace_count < 2)
+      {
+         memcpy(trace_tx[trace_count].bytes, tx_buf, tx_buf_length);
+         trace_tx[trace_count].len = tx_buf_length;
+         trace_tx[trace_count].position = written - fragment_length;
+         trace_tx[trace_count].ret = ret;
+         trace_count++;
+      }
+#endif
+
       /* Preserve and reuse the SPI header for the next fragment. */
       tx_buf_length = DXS_SPI_HDR_LENGTH;
    }
@@ -587,6 +689,12 @@ IFX_int32_t dxs_spi_write(DXS_DEVICE_t *pDev,
    SPI_DEVICE_RELEASE(pDev->nDevNr);
 #endif /* #ifdef SPI_DEVICE_RELEASE */
 
+#ifdef __KERNEL__
+   for (trace_i = 0; trace_i < trace_count; trace_i++)
+      dxs_trace_fragment(pDev, offset, trace_tx[trace_i].position,
+                         trace_tx[trace_i].bytes, trace_tx[trace_i].len,
+                         NULL, 0, trace_tx[trace_i].ret);
+#endif
    return ret;
 }
 
@@ -686,6 +794,9 @@ IFX_int32_t dxs_spi_read(DXS_DEVICE_t *pDev,
 
       /* Deactivate DXS by setting chip select line. (high means inactive) */
       SPI_CS_SET(pDev->nDevNr, IFX_HIGH);
+
+      dxs_trace_fragment(pDev, offset, read, tx_buf, tx_buf_length,
+                         rx_buf, csi ? 10 : fragment_length, ret);
 
       if (ret == DXS_statusOk)
       {

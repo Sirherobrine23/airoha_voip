@@ -21,6 +21,10 @@
 #include "drv_dxs_mbx.h"
 #include "drv_dxs_errno.h"
 #include "drv_dxs_fw_cmd_sdd.h"
+#ifdef __KERNEL__
+#include <linux/printk.h>
+#include "en75xx_dxs_kernel.h"
+#endif
 #include "drv_dxs_cid.h"
 #include "drv_dxs_dtmf.h"
 #include "drv_dxs_access.h"
@@ -304,6 +308,12 @@ static IFX_void_t dxs_event_sys(
 {
    if (pHdr->ECMD == EVT_ECMD_BOOTFIN)
    {
+#ifdef __KERNEL__
+      if (en75xx_dxs_event_trace || (pDev->nDevState & DS_DEV_INIT))
+         pr_warn("en75xx-dxs-event: device %u BOOT_FIN received, driver_initialized=%u state=%#x\n",
+                 pDev->nDevNr, !!(pDev->nDevState & DS_DEV_INIT),
+                 (unsigned int)pDev->nDevState);
+#endif
       /* Boot Finished event */
       pDev->nDevState |= DS_DEV_UP;
    }
@@ -347,6 +357,12 @@ static IFX_void_t dxs_event_sys(
       IFX_TAPI_EVENT_t tapiEvent = {0};
       IFX_uint32_t cerr_ack_cmd = 0x0600e000;
 
+#ifdef __KERNEL__
+      if (en75xx_dxs_event_trace)
+         pr_err("en75xx-dxs-event: device %u command error: reason=%#x rejected_header=%#x\n",
+                pDev->nDevNr, (unsigned int)pCerr->CMDERR, pCerr->CMDHDR);
+#endif
+
       /* acknowledge command error */
       (IFX_void_t) DXS_CmdWrite(pDev, &cerr_ack_cmd);
 
@@ -381,6 +397,14 @@ static IFX_void_t dxs_event_sdd(
             pSddEvt->hdr.CHAN));
       return;
    }
+
+#ifdef __KERNEL__
+   if (en75xx_dxs_event_trace)
+      pr_info("en75xx-dxs-event: device %u SDD channel=%u event=%u opmode=%u initialized=%u\n",
+              pDev->nDevNr, (unsigned int)pSddEvt->hdr.CHAN,
+              (unsigned int)pSddEvt->EVT, (unsigned int)pSddEvt->OPMODE,
+              !!(pDev->nDevState & DS_DEV_INIT));
+#endif
 
    if (!(pDev->nDevState & DS_DEV_INIT))
    {
@@ -696,6 +720,12 @@ IFX_int32_t DXS_outbox_handler (DXS_DEVICE_t *pDev)
       }
 
       /* decode the message and process it */
+#ifdef __KERNEL__
+      if (en75xx_dxs_event_trace && pHdr->CMD == EVT_CMD_EVT)
+         pr_info("en75xx-dxs-event: device %u outbox header=%#x payload0=%#x payload1=%#x\n",
+                 pDev->nDevNr, message[0], length ? message[1] : 0,
+                 length > 1 ? message[2] : 0);
+#endif
       if (pHdr->CMD == EVT_CMD_EVT &&
           ((pHdr->MOD == EVT_MOD_ALI && pHdr->LENGTH == 4) ||
            (pHdr->MOD == EVT_MOD_SYS && (pHdr->LENGTH == 0 ||
@@ -760,6 +790,12 @@ IFX_int32_t DXS_outbox_handler (DXS_DEVICE_t *pDev)
 
    /* release protection for concurrent tasks and interrupts */
    DXS_FW_DL_RELEASE (pDev);
+
+#ifdef __KERNEL__
+   if (en75xx_dxs_event_trace && !DXS_SUCCESS(ret))
+      pr_err("en75xx-dxs-event: device %u outbox status=%#x last_header=%#x\n",
+             pDev->nDevNr, (unsigned int)ret, message[0]);
+#endif
 
    return ret;
 }

@@ -22,6 +22,10 @@
 
 #include <drv_tapi_config.h>
 #include "drv_dxs_api.h"
+#ifdef __KERNEL__
+#include <linux/printk.h>
+#include "en75xx_dxs_kernel.h"
+#endif
 #include "drv_dxs_alm_priv.h"
 #include "drv_dxs_errno.h"
 #include "drv_dxs_alm_lt.h"
@@ -1123,6 +1127,13 @@ IFX_int32_t DXS_ALM_OnLineModeChanged (DXS_CHANNEL_t *pCh, IFX_uint32_t nOpmode)
    tapiEvent.ch = pCh->nChannel - 1;
    DXS_TAPI_EVENT_MODULE_SET(tapiEvent, IFX_TAPI_MODULE_TYPE_ALM);
 
+#ifdef __KERNEL__
+   if (en75xx_dxs_event_trace)
+      pr_info("en75xx-dxs-event: device %u channel %u opmode=%u calibration_running=%u\n",
+              pDev->nDevNr, pCh->nChannel, (unsigned int)nOpmode,
+              (unsigned int)pCh->pALM->bCalibrationRunning);
+#endif
+
    /* in VMMC driver there is no channel protection in this place */
    /* TAPI_OS_MutexGet (&pCh->mtxChAcc); */
 
@@ -1987,6 +1998,12 @@ static IFX_int32_t DXS_TAPI_LL_ALM_Calibration_Finish(
    pCalibrate = &pCh->pALM->fw_sdd_calibrate;
    pLastResults = &pCh->pALM->calibrationLastResults;
 
+#ifdef __KERNEL__
+   if (en75xx_dxs_event_trace)
+      pr_info("en75xx-dxs-event: device %u channel %u calibration finish entered\n",
+              pDev->nDevNr, pCh->nChannel);
+#endif
+
    /* protect channel from mutual access */
    if (!pCh->pALM->bCalibrationInternal)
       TAPI_OS_MutexGet (&pCh->mtxChAcc);
@@ -2038,6 +2055,13 @@ static IFX_int32_t DXS_TAPI_LL_ALM_Calibration_Finish(
    }
 
    pCh->pALM->bCalibrationNeeded = IFX_FALSE;
+
+#ifdef __KERNEL__
+   if (en75xx_dxs_event_trace)
+      pr_info("en75xx-dxs-event: device %u channel %u calibration finish state=%u status=%#x\n",
+              pDev->nDevNr, pCh->nChannel,
+              (unsigned int)pCh->pALM->nCalibrationState, (unsigned int)ret);
+#endif
 
    if (pCh->pALM->bCalibrationInternal)
    {
@@ -2109,10 +2133,18 @@ IFX_int32_t DXS_ALM_Calibration (DXS_CHANNEL_t *pCh)
    tapi_debug_buffer_add_user_entry("dxs #%d:%d analog calibration",
                                     pCh->pParent->nDevNr, pCh->nChannel);
 
+#ifdef __KERNEL__
+   en75xx_dxs_trace_snapshot(pCh->pParent->nDevNr, "before calibration");
+#endif
+
    /* protect channel from mutual access */
    TAPI_OS_MutexGet (&pCh->mtxChAcc);
 
    ret = dxs_alm_Calibration_Start (pCh, IFX_TRUE);
+#ifdef __KERNEL__
+   pr_info("en75xx-dxs-alm: device %u channel %u calibration start status=%#x\n",
+           pCh->pParent->nDevNr, pCh->nChannel, (unsigned int)ret);
+#endif
 
    /* release protection */
    TAPI_OS_MutexRelease (&pCh->mtxChAcc);
@@ -2140,6 +2172,16 @@ IFX_int32_t DXS_ALM_Calibration (DXS_CHANNEL_t *pCh)
 
       if (ret != DXS_statusOk)
       {
+#ifdef __KERNEL__
+         pr_err("en75xx-dxs-alm: device %u channel %u calibration wait failed: %d\n",
+                pCh->pParent->nDevNr, pCh->nChannel, (int)ret);
+         pr_err("en75xx-dxs-alm: cached opmode=%u running=%u pending=%u calibration_state=%u\n",
+                (unsigned int)pCh->pALM->curr_opmode,
+                (unsigned int)pCh->pALM->bCalibrationRunning,
+                (unsigned int)pCh->pALM->bOpmodeChangePending,
+                (unsigned int)pCh->pALM->nCalibrationState);
+         en75xx_dxs_trace_snapshot(pCh->pParent->nDevNr, "calibration wait failed");
+#endif
          /* errmsg: Automatic calibration timeout while waiting for event. */
          ret = DXS_statusAutomaticCalibrationTimeout;
       }
@@ -2508,6 +2550,17 @@ IFX_int32_t DXS_ALM_OpmodeSet (DXS_CHANNEL_t *pCh)
       pCh->pALM->bOpmodeChangePending = IFX_FALSE;
    }
 
+#ifdef __KERNEL__
+   if (en75xx_dxs_event_trace)
+   {
+      IFX_uint32_t raw[2];
+      memcpy(raw, pOpmod, sizeof(raw));
+      pr_info("en75xx-dxs-event: device %u channel %u opmode request=%u cached=%u header=%#x payload=%#x\n",
+              pCh->pParent->nDevNr, pCh->nChannel,
+              (unsigned int)pOpmod->OpMode, (unsigned int)curr_opmode,
+              raw[0], raw[1]);
+   }
+#endif
    ret = DXS_CmdWrite(pCh->pParent, (IFX_uint32_t *)(IFX_void_t *)pOpmod);
    return ret;
 }

@@ -36,6 +36,73 @@
 #include <drv_dxs_errno.h>
 
 #include <drv_tapi_osmap.h>
+#ifdef __KERNEL__
+#include <linux/module.h>
+#include <linux/printk.h>
+#include <linux/atomic.h>
+#include "en75xx_dxs_kernel.h"
+bool en75xx_dxs_event_trace;
+module_param_named(event_trace, en75xx_dxs_event_trace, bool, 0644);
+MODULE_PARM_DESC(event_trace, "Trace DXS polling, outbox events and calibration completion");
+
+struct dxs_trace_progress {
+   atomic_t poll;
+   atomic_t eligible;
+   atomic_t handler;
+   atomic_t int_reads;
+   atomic_t outbox_enter;
+   atomic_t outbox_done;
+   atomic_t done;
+};
+static struct dxs_trace_progress dxs_progress[DXS_MAX_DEVICES];
+
+#define DXS_TRACE_COUNT(dev, member) do { \
+   if (en75xx_dxs_event_trace && (dev)->nDevNr < DXS_MAX_DEVICES) \
+      atomic_inc(&dxs_progress[(dev)->nDevNr].member); \
+} while (0)
+
+/* Register-level observations independent of firmware mailbox responses.
+   Do not read INT1/INT2 (self-clearing) or DATA (consumes the outbox). */
+void en75xx_dxs_trace_snapshot(unsigned int index, const char *stage)
+{
+   static const IFX_uint8_t regs[] = {
+      DXS_HOST_CFG, DXS_HOST_IEN1, DXS_HOST_IEN2,
+      DXS_HOST_LEN, DXS_HOST_BINF
+   };
+   struct dxs_trace_progress *p;
+   DXS_DEVICE_t *dev;
+   unsigned int i;
+
+   if (!en75xx_dxs_event_trace || index >= DXS_MAX_DEVICES ||
+       DXS_GetDevice(index, &dev) != DXS_statusOk)
+      return;
+   p = &dxs_progress[index];
+   pr_info("en75xx-dxs-host: device %u %s: poll=%d eligible=%d handler=%d int_reads=%d outbox=%d/%d done=%d mode=%u state=%#x cached_fw=%#x\n",
+           index, stage, atomic_read(&p->poll), atomic_read(&p->eligible),
+           atomic_read(&p->handler), atomic_read(&p->int_reads),
+           atomic_read(&p->outbox_enter), atomic_read(&p->outbox_done),
+           atomic_read(&p->done), (unsigned int)dev->nEventHandlingMode,
+           (unsigned int)dev->nDevState, (unsigned int)dev->nFwRev);
+   for (i = 0; i < sizeof(regs) / sizeof(regs[0]); i++)
+   {
+      IFX_uint16_t value = 0xffff;
+      IFX_int32_t ret;
+
+      /* Leave a marker if a register transaction itself stops returning. */
+      pr_info("en75xx-dxs-host: device %u %s: reading reg=%#x\n",
+              index, stage, regs[i]);
+      ret = DXS_RegRead(dev, regs[i], &value);
+      if (ret == DXS_statusOk)
+         pr_info("en75xx-dxs-host: device %u %s: reg=%#x value=%#x status=0\n",
+                 index, stage, regs[i], value);
+      else
+         pr_err("en75xx-dxs-host: device %u %s: reg=%#x read failed status=%#x\n",
+                index, stage, regs[i], (unsigned int)ret);
+   }
+}
+#else
+#define DXS_TRACE_COUNT(dev, member) do { } while (0)
+#endif
 
 /* ========================================================================== */
 /*                             Macro definitions                              */
@@ -136,7 +203,7 @@ enum IFX_irqreturn_t DXS_interrupt_handler(DXS_DEVICE_t *pDev)
    enum IFX_irqreturn_t iret      = IFX_IRQ_NONE;
    IFX_int32_t       ret            = DXS_statusOk,
                      ret2           = DXS_statusOk;
-   IFX_uint16_t      nRegHostIrq[2];
+   IFX_uint16_t      nRegHostIrq[2] = {0};
    IFX_TAPI_EVENT_t  tapiEvent;
 
    if(pDev == IFX_NULL)
@@ -158,11 +225,20 @@ enum IFX_irqreturn_t DXS_interrupt_handler(DXS_DEVICE_t *pDev)
       return iret;
    }
 
+   DXS_TRACE_COUNT(pDev, handler);
 #ifndef DXS_SPI_8BIT_ACCESS
    /* read both interrupt registers (HOST_INT1, HOST_INT2) */
    ret = DXS_RegReadMulti(pDev, DXS_HOST_INT1, nRegHostIrq, 2);
 #else
    ret = DXS_RegRead(pDev, DXS_HOST_INT1, &nRegHostIrq[0]);
+#endif
+   DXS_TRACE_COUNT(pDev, int_reads);
+
+#ifdef __KERNEL__
+   if (en75xx_dxs_event_trace && (ret != DXS_statusOk || nRegHostIrq[0]))
+      pr_info("en75xx-dxs-event: device %u INT1=%#x read_status=%#x mode=%u state=%#x\n",
+              pDev->nDevNr, nRegHostIrq[0], (unsigned int)ret,
+              (unsigned int)pDev->nEventHandlingMode, (unsigned int)pDev->nDevState);
 #endif
 
    /* if err bit is set in "interrupt register 1" read
@@ -198,7 +274,9 @@ enum IFX_irqreturn_t DXS_interrupt_handler(DXS_DEVICE_t *pDev)
    /* handle the interrupts from "interrupt register 1" */
    if ((ret == DXS_statusOk) && (nRegHostIrq[0] & DXS_REG_IEN1_OBX_RDY))
    {
+      DXS_TRACE_COUNT(pDev, outbox_enter);
       ret = DXS_outbox_handler(pDev);
+      DXS_TRACE_COUNT(pDev, outbox_done);
       iret = IFX_IRQ_HANDLED;
    }
 #ifdef SPI_EXIT
@@ -215,6 +293,7 @@ enum IFX_irqreturn_t DXS_interrupt_handler(DXS_DEVICE_t *pDev)
       IFX_TAPI_Event_Dispatch(pDev->pChannel[0].pTapiCh, &tapiEvent);
    }
 
+   DXS_TRACE_COUNT(pDev, done);
    return iret;
 }
 
@@ -389,13 +468,21 @@ static IFX_void_t dxs_polling_mode_timer (Timer_ID timer_id,
    if (TAPI_OS_isRebootOngoing())
       return;
 
+#ifdef __KERNEL__
+   if (en75xx_dxs_event_trace)
+      pr_info_once("en75xx-dxs-event: background polling callback active\n");
+#endif
+
    /* check all devices */
    for (i=0; i < DXS_MAX_DEVICES; i++)
    {
-      if ((DXS_GetDevice(i, &pDev) == DXS_statusOk) &&
-          (pDev->nEventHandlingMode == DXS_EVENT_POLLING) &&
+      if (DXS_GetDevice(i, &pDev) != DXS_statusOk)
+         continue;
+      DXS_TRACE_COUNT(pDev, poll);
+      if ((pDev->nEventHandlingMode == DXS_EVENT_POLLING) &&
           (pDev->nDevState & DS_BASIC_INIT))
       {
+         DXS_TRACE_COUNT(pDev, eligible);
          /* execute the interupt handler */
          DXS_interrupt_handler(pDev);
       }

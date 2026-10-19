@@ -814,6 +814,16 @@ int en75xx_dxs_kernel_version(unsigned int index, u32 *hw, u32 *fw, unsigned int
    if (!hw || !fw || !channels || DXS_GetDevice(index, &pDev) != DXS_statusOk ||
        !(pDev->nDevState & DS_BASIC_INIT))
       return -EINVAL;
+   /* DXS_Version() otherwise returns cached values after DEV_START.
+    * The kernel bring-up path needs to verify the actual firmware even
+    * if an unexpected chip reboot left DS_DEV_INIT set in the host.
+    */
+   if (pDev->nDevState & DS_DEV_INIT)
+   {
+      ret = DXS_ReadFwVersion(pDev);
+      if (ret != DXS_statusOk)
+         return -EIO;
+   }
    ret = DXS_Version(pDev, &version);
    if (ret != DXS_statusOk)
       return -EIO;

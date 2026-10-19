@@ -34,6 +34,9 @@
 #include "../tapi/drv_tapi_api.h"
 #include "../../drv_tapi_dxs_version.h"
 #include "../tapi/drv_tapi_debug_buffer.h"
+#ifdef __KERNEL__
+#include <linux/printk.h>
+#endif
 
 /* ========================================================================== */
 /*                             Macro definitions                              */
@@ -1147,11 +1150,22 @@ static IFX_int32_t dxs_fw_start(DXS_DEVICE_t *pDev, const DXS_IO_Init_t *pInit,
          overhead, but requires that all interrupt events have to be processed
          immediately or remembered for later processing in the controller.
       */
-      const IFX_uint16_t nRegWrite = (DXS_REG_CFG_SC_MD_SCON | DXS_REG_CFG_8BIT_EN);
+      const IFX_uint16_t nRegWrite = DXS_RuntimeHostConfig(pDev);
+      IFX_uint16_t nRegRead = 0;
 
       tapi_debug_buffer_add_user_entry("dxs #%d configure irq", pDev->nDevNr);
 
       ret = DXS_RegWrite(pDev, DXS_HOST_CFG, nRegWrite);
+      if (ret == DXS_statusOk)
+      {
+         ret = DXS_RegRead(pDev, DXS_HOST_CFG, &nRegRead);
+#ifdef __KERNEL__
+         pr_info("en75xx-dxs-init: device %u runtime HOST_CFG: requested=%#x read=%#x status=%#x\n",
+                 pDev->nDevNr, nRegWrite, nRegRead, (unsigned int)ret);
+#endif
+         if ((ret == DXS_statusOk) && ((nRegRead & 0x0007) != nRegWrite))
+            ret = DXS_statusReadErr;
+      }
    }
 
    RETURN_DEVSTATUS(ret, IFX_NULL);

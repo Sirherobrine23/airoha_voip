@@ -30,6 +30,9 @@
 #include "../tapi/drv_tapi_debug_buffer.h"
 
 #include <lib_bbd.h>
+#ifdef __KERNEL__
+#include <linux/printk.h>
+#endif
 
 /* ========================================================================== */
 /*                             Macro definitions                              */
@@ -1033,9 +1036,35 @@ IFX_int32_t DXS_BBD_Download_32 (DXS_CHANNEL_t *pCh, DXS_BBD_Download_32_t *pBBD
    - DXS_statusBbdCorrupt
    - DXS_statusBbdBlockErr
 */
+#ifdef __KERNEL__
+/* Check at the boundary between coefficient writes and automatic calibration. */
+static IFX_int32_t dxs_bbd_verify_firmware(DXS_DEVICE_t *pDev,
+                                         IFX_uint32_t expected_fw)
+{
+   IFX_int32_t ret = DXS_ReadFwVersion(pDev);
+
+   if (ret != DXS_statusOk)
+   {
+      pr_err("en75xx-dxs-bbd: device %u before calibration: version read status=%#x\n",
+             pDev->nDevNr, (unsigned int)ret);
+      return ret;
+   }
+   pr_info("en75xx-dxs-bbd: device %u BBD blocks complete, before calibration: FW %#x (expected %#x)\n",
+           pDev->nDevNr, (unsigned int)pDev->nFwRev, (unsigned int)expected_fw);
+   if (pDev->nFwRev != expected_fw)
+   {
+      pr_err("en75xx-dxs-bbd: device %u firmware changed before calibration; stopping\n",
+             pDev->nDevNr);
+      return DXS_statusErr;
+   }
+   return DXS_statusOk;
+}
+#endif
+
 static IFX_int32_t dxs_bbd_download(DXS_CHANNEL_t *pCh,
                                     const DXS_BBD_Download_t *pBBD,
-                                    IFX_boolean_t kernel_buffer)
+                                    IFX_boolean_t kernel_buffer,
+                                    IFX_boolean_t calibrate)
 {
    IFX_int32_t       ret = DXS_statusOk;
    DXS_DEVICE_t      *pDev = IFX_NULL;
@@ -1044,6 +1073,9 @@ static IFX_int32_t dxs_bbd_download(DXS_CHANNEL_t *pCh,
    bbd_block_t       bbd_dxs_block;
    bbd_format_t      bbd;
    IFX_uint32_t      ch;
+#ifdef __KERNEL__
+   IFX_uint32_t      expected_fw;
+#endif
 
    /* in case DXS_BBD_Download is called via device ioctl, parameters
       should be validated */
@@ -1084,6 +1116,9 @@ static IFX_int32_t dxs_bbd_download(DXS_CHANNEL_t *pCh,
       pDev = pCh->pParent;
    }
 
+#ifdef __KERNEL__
+   expected_fw = pDev->nFwRev;
+#endif
    tapi_debug_buffer_add_user_entry("dxs #%d BBD download", pDev->nDevNr);
 
    /* initializations */
@@ -1124,6 +1159,10 @@ static IFX_int32_t dxs_bbd_download(DXS_CHANNEL_t *pCh,
       bbd_err = bbd_check_integrity(&bbd, BBD_DXS_MAGIC);
       if (bbd_err != BBD_INTG_OK)
       {
+#ifdef __KERNEL__
+         pr_err("en75xx-dxs-bbd: device %u integrity check failed: %u\n",
+                pDev->nDevNr, (unsigned int)bbd_err);
+#endif
          TAPI_OS_Free(bbd.buf);
          /* errmsg: The BBD download buffer is corrupt. */
          RETURN_DEVSTATUS(DXS_statusBbdCorrupt, IFX_NULL);
@@ -1184,6 +1223,11 @@ static IFX_int32_t dxs_bbd_download(DXS_CHANNEL_t *pCh,
       /* stop everything if the previous download went wrong */
       if (DXS_statusOk != ret)
       {
+#ifdef __KERNEL__
+         pr_err("en75xx-dxs-bbd: device %u block tag=%#x index=%u status=%#x\n",
+                pDev->nDevNr, (unsigned int)bbd_dxs_block.tag,
+                (unsigned int)j, (unsigned int)ret);
+#endif
          TAPI_OS_Free(bbd.buf);
          /* errmsg: Downloading a BBD block failed. */
          RETURN_STATUS(DXS_statusBbdBlockErr, IFX_NULL);
@@ -1192,7 +1236,14 @@ static IFX_int32_t dxs_bbd_download(DXS_CHANNEL_t *pCh,
 
    TAPI_OS_Free(bbd.buf);
 
-   if (DXS_SUCCESS(ret))
+#ifdef __KERNEL__
+   if (kernel_buffer && DXS_SUCCESS(ret))
+      ret = dxs_bbd_verify_firmware(pDev, expected_fw);
+#endif
+
+   /* Only the diagnostic prepare entry point may leave calibration pending.
+      The normal ioctl and voice entry point always request calibration. */
+   if (calibrate && DXS_SUCCESS(ret))
    {
       /* Do automatically a calibration on the channel on which the BBD was
          downloaded to adapt to new coefficients. */
@@ -1222,6 +1273,10 @@ static IFX_int32_t dxs_bbd_download(DXS_CHANNEL_t *pCh,
 
       if (!DXS_SUCCESS(ret))
       {
+#ifdef __KERNEL__
+         pr_err("en75xx-dxs-bbd: device %u channel %u automatic calibration status=%#x\n",
+                pDev->nDevNr, pCh->nChannel, (unsigned int)ret);
+#endif
          /* errmsg: Automatic calibration after BBD download failed. */
          ret = DXS_statusAutomaticCalibrationFailed;
       }
@@ -1462,7 +1517,7 @@ IFX_int32_t DXS_BBD_Download(DXS_CHANNEL_t *pCh, DXS_BBD_Download_t *pBBD)
    /* Explicit check to satisfy Klocwork scan. */
    if (pBBD->buf <= (IFX_uint8_t *) SIZE_MAX)
    {
-      return dxs_bbd_download(pCh, pBBD, IFX_FALSE);
+      return dxs_bbd_download(pCh, pBBD, IFX_FALSE, IFX_TRUE);
    }
 
    RETURN_STATUS(DXS_statusBbdErr, IFX_NULL);
@@ -1475,7 +1530,8 @@ IFX_int32_t DXS_BBD_Download(DXS_CHANNEL_t *pCh, DXS_BBD_Download_t *pBBD)
 #ifdef __KERNEL__
 #include "en75xx_dxs_kernel.h"
 
-int en75xx_dxs_kernel_bbd(unsigned int index, const u8 *data, size_t size)
+static int en75xx_dxs_bbd_download(unsigned int index, const u8 *data,
+                                  size_t size, IFX_boolean_t calibrate)
 {
    DXS_DEVICE_t *pDev;
    DXS_BBD_Download_t bbd = {0};
@@ -1489,8 +1545,22 @@ int en75xx_dxs_kernel_bbd(unsigned int index, const u8 *data, size_t size)
       return -EINVAL;
    bbd.buf = (IFX_uint8_t *)data;
    bbd.size = size;
-   ret = dxs_bbd_download((DXS_CHANNEL_t *)(void *)pDev, &bbd, IFX_TRUE);
+   ret = dxs_bbd_download((DXS_CHANNEL_t *)(void *)pDev, &bbd, IFX_TRUE, calibrate);
+   if (ret != DXS_statusOk)
+      pr_err("en75xx-dxs-bbd: device %u BBD failed: DXS status=%#x, allowed DC/DC=%u\n",
+             index, (unsigned int)ret, (unsigned int)nAllowedDcDcType);
    return ret == DXS_statusOk ? 0 : -EIO;
 }
+int en75xx_dxs_kernel_bbd(unsigned int index, const u8 *data, size_t size)
+{
+   return en75xx_dxs_bbd_download(index, data, size, IFX_TRUE);
+}
 EXPORT_SYMBOL_GPL(en75xx_dxs_kernel_bbd);
+
+/* Diagnostic only: no PCM/linefeed may be enabled with calibration pending. */
+int en75xx_dxs_kernel_bbd_prepare(unsigned int index, const u8 *data, size_t size)
+{
+   return en75xx_dxs_bbd_download(index, data, size, IFX_FALSE);
+}
+EXPORT_SYMBOL_GPL(en75xx_dxs_kernel_bbd_prepare);
 #endif
