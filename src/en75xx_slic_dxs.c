@@ -26,6 +26,11 @@ static unsigned int stage_wait_ms = 1000;
 module_param(stage_wait_ms, uint, 0444);
 MODULE_PARM_DESC(stage_wait_ms, "Diagnostic stage settling time (100..60000 ms); unused in voice mode");
 
+/* Opt in until the analog tone path has been checked on the target board. */
+static bool hardware_tones;
+module_param(hardware_tones, bool, 0444);
+MODULE_PARM_DESC(hardware_tones, "Expose the DXS internal analog tone generator (default off)");
+
 struct en75xx_dxs;
 struct en75xx_dxs_line {
 	struct en75xx_dxs *dxs;
@@ -167,11 +172,70 @@ static int dxs_faults(void *priv, u32 *faults)
 	return 0;
 }
 
+static int dxs_tone(void *priv, const struct en75xx_voice_tone *tone)
+{
+	struct en75xx_dxs_line *line = priv;
+	struct en75xx_dxs *dxs = line->dxs;
+	IFX_TAPI_TONE_t table = {0};
+	IFX_TAPI_TONE_PLAY_t play = {0};
+	unsigned int index = 32 + dxs->index * DXS_LINES + (line - dxs->line);
+	int ret;
+
+	/* DXS supports two oscillators, 0.1 dB TAPI levels, and 1 ms cadence. */
+	if (tone->reserved || tone->freq1_hz > 3400 || tone->freq2_hz > 3400 ||
+	    tone->freq1_hz % 5 || tone->freq2_hz % 5 ||
+	    tone->level_dbm < -30 || tone->level_dbm > 0 ||
+	    tone->on_ms > 16383 || tone->off_ms > 16383 ||
+	    (tone->off_ms && !tone->on_ms) || index > 255)
+		return -EINVAL;
+
+	play.module = IFX_TAPI_MODULE_TYPE_ALM;
+	play.external = 1;
+	play.bMuteOtherVoice = 1;
+	mutex_lock(&dxs->lock);
+	/* Index zero stops the ALM generator, including a previous tone. */
+	ret = dxs_ioctl(dxs, line->handle, IFX_TAPI_TONE_PLAY, &play);
+	if (ret || (!tone->freq1_hz && !tone->freq2_hz))
+		goto out;
+	if (line->ringing || dxs->faults) {
+		ret = -EBUSY;
+		goto out;
+	}
+	table.simple.format = IFX_TAPI_TONE_TYPE_SIMPLE;
+	table.simple.index = index;
+	table.simple.freqA = tone->freq1_hz;
+	table.simple.freqB = tone->freq2_hz;
+	table.simple.levelA = tone->level_dbm * 10;
+	table.simple.levelB = tone->level_dbm * 10;
+	table.simple.cadence[0] = tone->on_ms ? tone->on_ms : 1000;
+	table.simple.frequencies[0] =
+		(tone->freq1_hz ? IFX_TAPI_TONE_FREQA : 0) |
+		(tone->freq2_hz ? IFX_TAPI_TONE_FREQB : 0);
+	/* One cadence, loop=0 and pause=0 means continuous in TAPI3. */
+	table.simple.cadence[1] = tone->off_ms;
+	ret = dxs_ioctl(dxs, dxs->handle, IFX_TAPI_TONE_TABLE_CFG_SET, &table);
+	if (ret)
+		goto out;
+	play.index = index;
+	ret = dxs_ioctl(dxs, line->handle, IFX_TAPI_TONE_PLAY, &play);
+out:
+	mutex_unlock(&dxs->lock);
+	return ret;
+}
+
 static const struct en75xx_voice_slic_ops dxs_slic_ops = {
 	.get_hook = dxs_hook,
 	.set_linefeed = dxs_feed,
 	.ring = dxs_ring,
 	.get_faults = dxs_faults,
+};
+
+static const struct en75xx_voice_slic_ops dxs_tone_slic_ops = {
+	.get_hook = dxs_hook,
+	.set_linefeed = dxs_feed,
+	.ring = dxs_ring,
+	.get_faults = dxs_faults,
+	.set_tone = dxs_tone,
 };
 
 static void dxs_events(struct work_struct *work)
@@ -621,6 +685,7 @@ static int en75xx_dxs_probe(struct platform_device *pdev)
 		line->voice = en75xx_voice_register_line(dev, dxs->pcm, line->pcm_channel,
 						   dxs->index * DXS_LINES + i,
 						   count == 2 ? "PEF32002" : "PEF32001",
+						   hardware_tones ? &dxs_tone_slic_ops :
 						   &dxs_slic_ops, line);
 		if (IS_ERR(line->voice)) {
 			ret = PTR_ERR(line->voice);

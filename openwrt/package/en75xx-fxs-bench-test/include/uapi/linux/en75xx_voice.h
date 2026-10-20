@@ -41,6 +41,7 @@ struct en75xx_voice_info {
 #define EN75XX_VOICE_CAP_HOOK (1U << 1)
 #define EN75XX_VOICE_CAP_LINEFEED (1U << 2)
 #define EN75XX_VOICE_CAP_PCM (1U << 3)
+#define EN75XX_VOICE_CAP_TONE (1U << 4)
 
 struct en75xx_voice_line_state {
 	__u32 hook;
@@ -53,6 +54,24 @@ struct en75xx_voice_ring {
 	__u32 enable;
 	__u32 cadence_on_ms;
 	__u32 cadence_off_ms;
+	__u32 reserved;
+};
+
+/*
+ * A tone played by the SLIC itself: one or two sine waves summed onto
+ * the line, with an optional on/off cadence, and no host involvement
+ * once it is running. Both frequencies zero stops whatever is playing.
+ *
+ * Only advertised when EN75XX_VOICE_CAP_TONE is set; SLICs without
+ * oscillators fail EN75XX_VOICE_SET_TONE with EOPNOTSUPP and the caller
+ * is expected to fall back to synthesising the tone in software.
+ */
+struct en75xx_voice_tone {
+	__u32 freq1_hz;
+	__u32 freq2_hz;
+	__s32 level_dbm;	/* per oscillator, dBm into 600 ohm, <= 0 */
+	__u32 on_ms;		/* 0 for a continuous tone */
+	__u32 off_ms;
 	__u32 reserved;
 };
 
@@ -71,5 +90,8 @@ struct en75xx_voice_stats {
 #define EN75XX_VOICE_SET_LINEFEED   _IOW(EN75XX_VOICE_IOC_MAGIC, 0x03, __u32)
 #define EN75XX_VOICE_FLUSH          _IO(EN75XX_VOICE_IOC_MAGIC, 0x04)
 #define EN75XX_VOICE_GET_STATS      _IOR(EN75XX_VOICE_IOC_MAGIC, 0x05, struct en75xx_voice_stats)
+#define EN75XX_VOICE_SET_TONE       _IOW(EN75XX_VOICE_IOC_MAGIC, 0x06, struct en75xx_voice_tone)
+/* 0 suspends automatic level control on this line, 1 resumes it. */
+#define EN75XX_VOICE_SET_ALC        _IOW(EN75XX_VOICE_IOC_MAGIC, 0x07, __u32)
 
 #endif /* _UAPI_LINUX_EN75XX_VOICE_H */

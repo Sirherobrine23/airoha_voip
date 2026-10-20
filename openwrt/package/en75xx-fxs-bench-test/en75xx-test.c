@@ -185,14 +185,55 @@ out:
 	if (fp && fclose(fp)) { perror("fclose"); ret = -1; }
 	return ret;
 }
+/* No sample reads/writes: the SLIC synthesizes this tone on its ALM path. */
+static int hardware_tone(int fd, unsigned seconds, unsigned hz)
+{
+	struct en75xx_voice_line_state s;
+	struct en75xx_voice_tone tone = { .freq1_hz = hz, .level_dbm = -24 };
+	const struct en75xx_voice_tone silence = {0};
+	int64_t deadline;
+	int ret = -1;
+
+	if (state(fd, &s)) return -1;
+	if (s.hook != EN75XX_VOICE_OFFHOOK) {
+		fprintf(stderr, "Hardware tone refused: lift the handset first.\n");
+		return -1;
+	}
+	if (ioctl(fd, EN75XX_VOICE_SET_TONE, &tone)) {
+		perror("SET_TONE");
+		goto out;
+	}
+	printf("SLIC internal tone: %u Hz, -24 dBm; no PCM sample I/O\n", hz);
+	deadline = now_ms() + seconds * 1000;
+	ret = 0;
+	while (!stopped && now_ms() < deadline) {
+		struct timespec pause = { .tv_nsec = 20000000 };
+		if (state(fd, &s)) { ret = -1; break; }
+		if (s.hook == EN75XX_VOICE_ONHOOK) {
+			puts("On-hook; stopping hardware tone.");
+			break;
+		}
+		nanosleep(&pause, NULL);
+	}
+out:
+	/* Also stop after a partially failed start. release() is a fallback. */
+	if (ioctl(fd, EN75XX_VOICE_SET_TONE, &silence)) {
+		perror("STOP_TONE");
+		ret = -1;
+	}
+	return ret;
+}
+
 static void usage(const char *name)
 {
 	fprintf(stderr, "Usage: %s DEVICE info\n"
 		"       %s DEVICE {hook|ring|tone} SECONDS\n"
 		"       %s DEVICE {record|play} SECONDS FILE.s16le\n"
+		"       %s DEVICE hwtone SECONDS HZ\n"
+		"HZ: 5..3400, multiples of 5; requires SLIC tone capability.\n"
 		"SECONDS: 1..120 (ring: 1..15); ring cadence 1000/4000 ms.\n"
 		"All opens start PCM DMA with ABI v1. Stop Asterisk before testing.\n",
-		name, name, name);
+		name, name, name, name);
 }
 int main(int argc, char **argv)
 {
@@ -202,13 +243,15 @@ int main(int argc, char **argv)
 	unsigned seconds = 0;
 	char *end;
 	long value;
-	int fd, ret, is_info, is_control, is_audio;
+	int fd, ret, is_info, is_control, is_audio, is_hwtone;
+	unsigned hz = 0;
 	if (argc < 3) { usage(argv[0]); return 2; }
 	is_info = !strcmp(argv[2], "info");
 	is_control = !strcmp(argv[2], "hook") || !strcmp(argv[2], "ring");
 	is_audio = !strcmp(argv[2], "tone") || !strcmp(argv[2], "record") || !strcmp(argv[2], "play");
-	if ((!is_info && !is_control && !is_audio) ||
-	    argc != (is_info ? 3 : (!strcmp(argv[2], "record") || !strcmp(argv[2], "play")) ? 5 : 4)) {
+	is_hwtone = !strcmp(argv[2], "hwtone");
+	if ((!is_info && !is_control && !is_audio && !is_hwtone) ||
+	    argc != (is_info ? 3 : (is_hwtone || !strcmp(argv[2], "record") || !strcmp(argv[2], "play")) ? 5 : 4)) {
 		usage(argv[0]); return 2;
 	}
 	if (!is_info) {
@@ -217,6 +260,13 @@ int main(int argc, char **argv)
 			usage(argv[0]); return 2;
 		}
 		seconds = value;
+	}
+	if (is_hwtone) {
+		errno = 0; value = strtol(argv[4], &end, 10);
+		if (errno || !*argv[4] || *end || value < 5 || value > 3400 || value % 5) {
+			usage(argv[0]); return 2;
+		}
+		hz = value;
 	}
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGINT, &sa, NULL); sigaction(SIGTERM, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
@@ -237,6 +287,12 @@ int main(int argc, char **argv)
 		ret = state(fd, &s);
 		if (!ret) printf("hook=%u ringing(requested)=%u linefeed(cached)=%u faults=0x%x\n",
 				s.hook, s.ringing, s.linefeed, s.faults);
+	} else if (is_hwtone) {
+		if (!(info.capabilities & EN75XX_VOICE_CAP_TONE)) {
+			fprintf(stderr, "SLIC does not expose hardware tones; check driver build and hardware_tones=1.\n");
+			goto out;
+		}
+		ret = hardware_tone(fd, seconds, hz);
 	} else if (is_control) ret = controls(fd, argv[2], seconds);
 	else ret = audio(fd, argv[2], seconds, argc == 5 ? argv[4] : NULL);
 	stats(fd, &before);
