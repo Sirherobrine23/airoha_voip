@@ -22,6 +22,68 @@ def run_c(source):
 
 
 class DxsStageIsolation(unittest.TestCase):
+    def test_calibration_mode_validates_bbd_without_pcm_settings(self):
+        source = (ROOT / 'src/en75xx_slic_dxs.c').read_text()
+        probe = source[source.index('static int en75xx_dxs_probe('):]
+        modes = probe[probe.index('\tif (strcmp(mode, "identify")'):probe.index('\tcount = of_property_count_u32_elems')]
+        settings = probe[probe.index('\tif (voice || bbd_only || calibrate_only)'):probe.index('\tif (strcmp(mode, "identify"))')]
+        harness = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <string.h>
+#include <errno.h>
+struct firmware { int unused; };
+struct device { void *of_node; };
+struct en75xx_dxs { int unused; };
+static unsigned stage_wait_ms;
+static int pcm_checks, bbd_loads, missing_pcm, missing_bbd, wrong_topology;
+static int of_property_read_string(void *node, const char *key, const char **out)
+{
+    if(!strcmp(key,"maxlinear,dcdc-topology"))
+        *out=wrong_topology ? "other" : "CIBB12";
+    else { if(missing_bbd) return -ENOENT; *out="board-bbd.bin"; }
+    return 0;
+}
+static int dxs_pcm_settings(struct en75xx_dxs *d)
+{ pcm_checks++; return missing_pcm ? -EINVAL : 0; }
+static int request_firmware(const struct firmware **out, const char *name, struct device *dev)
+{ bbd_loads++; return 0; }
+static int validate(const char *mode)
+{
+    struct en75xx_dxs object, *dxs=&object;
+    struct device device, *dev=&device;
+    const struct firmware *bbd=0;
+    const char *topology, *bbdname;
+    bool voice, start_only, bbd_only, calibrate_only;
+    int ret;
+'''
+        harness += modes + settings
+        harness += r'''
+    (void)start_only;
+    return 0;
+fail:
+    return ret;
+}
+static void reset(void)
+{ stage_wait_ms=3000; pcm_checks=bbd_loads=missing_bbd=wrong_topology=0; missing_pcm=1; }
+int main(void)
+{
+    reset(); assert(validate("calibrate")==0 && bbd_loads==1 && !pcm_checks);
+    reset(); assert(validate("voice")==-EINVAL && pcm_checks==1 && !bbd_loads);
+    reset(); missing_bbd=1;
+    assert(validate("calibrate")==-EINVAL && !bbd_loads && !pcm_checks);
+    reset(); wrong_topology=1;
+    assert(validate("calibrate")==-EINVAL && !bbd_loads);
+    reset(); stage_wait_ms=99;
+    assert(validate("calibrate")==-EINVAL && !bbd_loads);
+    reset(); stage_wait_ms=60001;
+    assert(validate("calibrate")==-EINVAL && !bbd_loads);
+    reset(); assert(validate("unknown")==-EINVAL && !bbd_loads);
+    return 0;
+}
+'''
+        run_c(harness)
+
     def test_stage_boundaries_and_firmware_loss(self):
         source = (ROOT / 'src/en75xx_slic_dxs.c').read_text()
         functions = '\n'.join(function(source, name) for name in (
@@ -29,7 +91,7 @@ class DxsStageIsolation(unittest.TestCase):
             'static int dxs_wait_stage('))
         probe = source[source.index('static int en75xx_dxs_probe('):]
         begin = probe.index('\tret = dxs_boot_firmware(dxs, fw);')
-        end = probe.index('\tdev_info(dev, "DXS BBD accepted:')
+        end = probe.index('\tret = dxs_configure_pcm(dxs);')
         boundary = probe[begin:end]
         harness = r'''
 #include <assert.h>
@@ -42,7 +104,7 @@ struct firmware { const unsigned char *data; size_t size; };
 struct en75xx_dxs { void *dev, *handle; unsigned index, count; u32 loaded_fw; bool started; };
 static unsigned stage_wait_ms = 1000;
 static u32 live_fw;
-static int reads, sleeps, reset_on_sleep, reset_at_start, fail_read;
+static int reads, sleeps, reset_on_sleep, reset_at_start, reset_at_calibration, fail_read;
 static int starts, prepares, calibrates, completed, cleanup, released, voice_path, bbd_error;
 #define dev_info(...) ((void)0)
 #define dev_err(...) ((void)0)
@@ -58,7 +120,7 @@ static int dxs_ioctl(struct en75xx_dxs *d, void *h, unsigned cmd, void *arg)
 static int en75xx_dxs_kernel_bbd_prepare(unsigned i, const unsigned char *data, size_t size)
 { prepares++; return bbd_error; }
 static int en75xx_dxs_kernel_bbd(unsigned i, const unsigned char *data, size_t size)
-{ calibrates++; return bbd_error; }
+{ calibrates++; if(reset_at_calibration) live_fw=0x02000000; return bbd_error; }
 static void platform_set_drvdata(void *p, struct en75xx_dxs *d) { completed++; }
 static void release_firmware(const struct firmware *f) { released++; }
 '''
@@ -66,13 +128,14 @@ static void release_firmware(const struct firmware *f) { released++; }
         harness += r'''
 static int run_stage(struct en75xx_dxs *dxs, int mode)
 {
-    bool voice=mode==3, start_only=mode==1, bbd_only=mode==2;
+    bool voice=mode==3, start_only=mode==1, bbd_only=mode==2, calibrate_only=mode==4;
     const struct firmware image={(void *)1, 498}, *fw=&image, *bbd=&image;
     void *dev=0, *pdev=0;
+    const char *topology="CIBB12";
     int start=0, ret;
     u32 hw_version, fw_version;
     unsigned fxs_count;
-    (void)dev;
+    (void)dev; (void)topology;
 '''
         harness += boundary
         harness += r'''
@@ -86,7 +149,7 @@ static void reset(struct en75xx_dxs *d)
 {
     *d=(struct en75xx_dxs){.count=1};
     live_fw=0x02000000;
-    reads=sleeps=reset_on_sleep=reset_at_start=fail_read=0;
+    reads=sleeps=reset_on_sleep=reset_at_start=reset_at_calibration=fail_read=0;
     starts=prepares=calibrates=completed=cleanup=released=voice_path=bbd_error=0;
 }
 int main(void)
@@ -112,6 +175,17 @@ int main(void)
     assert(run_stage(&d,1)==-ETIMEDOUT && !completed);
     reset(&d); bbd_error=-EIO;
     assert(run_stage(&d,3)==-EIO && reads==4 && !voice_path && !completed);
+    reset(&d); assert(run_stage(&d,4)==0);
+    assert(starts==1 && sleeps==2 && !prepares && calibrates==1);
+    assert(reads==5 && completed==1 && released==2 && !voice_path && !cleanup);
+    reset(&d); bbd_error=-EIO;
+    assert(run_stage(&d,4)==-EIO && !voice_path && !completed && cleanup==1);
+    reset(&d); reset_at_calibration=1;
+    assert(run_stage(&d,4)==-EIO && !voice_path && !completed && sleeps==1);
+    reset(&d); reset_on_sleep=2;
+    assert(run_stage(&d,4)==-EIO && !voice_path && !completed && sleeps==2);
+    reset(&d); fail_read=5;
+    assert(run_stage(&d,4)==-ETIMEDOUT && !voice_path && !completed);
     return 0;
 }
 '''

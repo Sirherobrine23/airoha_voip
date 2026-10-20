@@ -20,7 +20,7 @@
 
 static char *bringup_mode;
 module_param(bringup_mode, charp, 0444);
-MODULE_PARM_DESC(bringup_mode, "Override DTS mode: identify, firmware, start, bbd or voice");
+MODULE_PARM_DESC(bringup_mode, "Override DTS mode: identify, firmware, start, bbd, calibrate or voice");
 
 static unsigned int stage_wait_ms = 1000;
 module_param(stage_wait_ms, uint, 0444);
@@ -408,7 +408,7 @@ static int en75xx_dxs_probe(struct platform_device *pdev)
 	u32 channels[DXS_LINES];
 	char name[24];
 	int count, ret, i, txbit, rxbit;
-	bool voice, start_only, bbd_only;
+	bool voice, start_only, bbd_only, calibrate_only;
 
 	dxs = devm_kzalloc(dev, sizeof(*dxs), GFP_KERNEL);
 	if (!dxs)
@@ -450,13 +450,15 @@ static int en75xx_dxs_probe(struct platform_device *pdev)
 	if (bringup_mode)
 		mode = bringup_mode;
 	if (strcmp(mode, "identify") && strcmp(mode, "firmware") &&
-	    strcmp(mode, "start") && strcmp(mode, "bbd") && strcmp(mode, "voice")) {
+	    strcmp(mode, "start") && strcmp(mode, "bbd") &&
+	    strcmp(mode, "calibrate") && strcmp(mode, "voice")) {
 		ret = -EINVAL;
 		goto fail;
 	}
 	voice = !strcmp(mode, "voice");
 	start_only = !strcmp(mode, "start");
 	bbd_only = !strcmp(mode, "bbd");
+	calibrate_only = !strcmp(mode, "calibrate");
 	if (!voice && strcmp(mode, "identify") &&
 	    (stage_wait_ms < 100 || stage_wait_ms > 60000)) {
 		ret = -EINVAL;
@@ -478,7 +480,7 @@ static int en75xx_dxs_probe(struct platform_device *pdev)
 			goto fail;
 		}
 	}
-	if (voice || bbd_only) {
+	if (voice || bbd_only || calibrate_only) {
 		if (of_property_read_string(dev->of_node, "maxlinear,dcdc-topology", &topology) ||
 		    strcmp(topology, "CIBB12") ||
 		    of_property_read_string(dev->of_node, "maxlinear,bbd-firmware", &bbdname)) {
@@ -522,7 +524,7 @@ static int en75xx_dxs_probe(struct platform_device *pdev)
 	ret = dxs_boot_firmware(dxs, fw);
 	if (ret)
 		goto fail;
-	if (!voice && !start_only && !bbd_only) {
+	if (!voice && !start_only && !bbd_only && !calibrate_only) {
 		ret = dxs_wait_stage(dxs, "after firmware download");
 		if (ret)
 			goto fail;
@@ -535,8 +537,9 @@ static int en75xx_dxs_probe(struct platform_device *pdev)
 	if (ret)
 		goto fail;
 	dxs->started = true;
-	ret = (start_only || bbd_only) ? dxs_wait_stage(dxs, "after DEV_START") :
-					 dxs_verify_firmware(dxs, "after DEV_START");
+	ret = (start_only || bbd_only || calibrate_only) ?
+		dxs_wait_stage(dxs, "after DEV_START") :
+		dxs_verify_firmware(dxs, "after DEV_START");
 	if (ret)
 		goto fail;
 	if (start_only) {
@@ -583,6 +586,16 @@ static int en75xx_dxs_probe(struct platform_device *pdev)
 	ret = dxs_verify_firmware(dxs, "after BBD calibration");
 	if (ret)
 		goto fail;
+	if (calibrate_only) {
+		ret = dxs_wait_stage(dxs, "after calibration, before PCM activation");
+		if (ret)
+			goto fail;
+		dev_info(dev, "DXS calibration test passed; no PCM activation or linefeed started\n");
+		platform_set_drvdata(pdev, dxs);
+		release_firmware(bbd);
+		release_firmware(fw);
+		return 0;
+	}
 	ret = dxs_configure_pcm(dxs);
 	if (ret)
 		goto fail;

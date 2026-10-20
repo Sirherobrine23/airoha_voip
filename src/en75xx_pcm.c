@@ -36,6 +36,11 @@ static bool clock_on_probe = true;
 module_param_named(clock_on_probe, clock_on_probe, bool, 0444);
 MODULE_PARM_DESC(clock_on_probe, "Start PCM interface clocking (PCLK/FSYNC) on probe");
 
+/* Opt-in diagnostic: do not disturb live SLIC control clocks on DMA open. */
+static bool preserve_interface;
+module_param_named(preserve_interface, preserve_interface, bool, 0644);
+MODULE_PARM_DESC(preserve_interface, "Preserve an already started PCM interface when starting DMA (diagnostic, default off)");
+
 static bool lec_enable;
 module_param_named(lec_enable, lec_enable, bool, 0644);
 MODULE_PARM_DESC(lec_enable, "Enable OSLEC line echo cancellation on the RX path");
@@ -212,6 +217,7 @@ struct en75xx_pcm_dev {
 	u32 iface_ctrl;
 	u8 dma_channel_mask;
 	u8 active_mask;
+	bool iface_started;
 	bool running;
 	bool swap_samples;
 	bool big_endian_samples;
@@ -722,6 +728,7 @@ static void en75xx_pcm_iface_start(struct en75xx_pcm_dev *pcm)
 		  pcm->iface_ctrl & ~EN75XX_PCM_CTRL_CFG_VALID);
 	pcm_write(pcm, EN75XX_PCM_IFACE_CTRL,
 		  pcm->iface_ctrl | EN75XX_PCM_CTRL_CFG_VALID);
+	pcm->iface_started = true;
 }
 
 void en75xx_pcm_iface_kick(struct en75xx_pcm *pub)
@@ -740,24 +747,26 @@ EXPORT_SYMBOL_GPL(en75xx_pcm_iface_kick);
 
 static int en75xx_pcm_hw_start(struct en75xx_pcm_dev *pcm)
 {
-	unsigned int index, i;
+	unsigned int index;
 	u32 dma_ctrl;
 	int ret;
 
 	en75xx_pcm_hw_stop(pcm);
-	ret = en75xx_pcm_soft_reset(pcm);
-	if (ret)
-		return ret;
-
-	for (i = 0; i < EN75XX_PCM_SLOT_REGS; i++) {
-		pcm_write(pcm, EN75XX_PCM_TX_SLOT0 + i * 4, pcm->tx_slots[i]);
-		pcm_write(pcm, EN75XX_PCM_RX_SLOT0 + i * 4, pcm->rx_slots[i]);
+	/* ISI/CSI control can already be live before the first audio open.
+	 * Resetting this block or pulsing CFG_VALID then can interrupt that
+	 * control path. Keep the old path unless the diagnostic is enabled;
+	 * a cold interface must still receive reset/configuration normally.
+	 */
+	if (!READ_ONCE(preserve_interface) || !pcm->iface_started) {
+		pcm->iface_started = false;
+		ret = en75xx_pcm_soft_reset(pcm);
+		if (ret)
+			return ret;
+		en75xx_pcm_iface_start(pcm);
+	} else {
+		dev_info(pcm->dev,
+			 "starting DMA while preserving active PCM interface\n");
 	}
-	/* The vendor driver commits this register with a clear -> set edge. */
-	pcm_write(pcm, EN75XX_PCM_IFACE_CTRL,
-		  pcm->iface_ctrl & ~EN75XX_PCM_CTRL_CFG_VALID);
-	pcm_write(pcm, EN75XX_PCM_IFACE_CTRL,
-		  pcm->iface_ctrl | EN75XX_PCM_CTRL_CFG_VALID);
 	pcm_write(pcm, EN75XX_PCM_TX_DESC_BASE,
 		en75xx_pcm_dma_addr(pcm, pcm->tx_ring_dma));
 	pcm_write(pcm, EN75XX_PCM_RX_DESC_BASE,

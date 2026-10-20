@@ -138,6 +138,8 @@ define Build/Configure
 			--with-kernel-module \
 			--enable-tapi3 \
 			--enable-kernel-api \
+			--enable-ring-engine \
+			--disable-ring-adaptive-bittime \
 			--enable-dcdc-hw=CIBB12 \
 			--with-max-devices=2))
 endef
